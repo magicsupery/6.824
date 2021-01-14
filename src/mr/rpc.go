@@ -23,7 +23,49 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type Task int
+const (
+	NoTask Task = iota
+	MapTask
+	ReduceTask
+	ExitTask
+)
 
+type ApplyTaskArgs struct {
+
+}
+
+type ApplyTaskReply struct {
+	Task Task
+	Args []byte
+}
+
+type MapArgs struct{
+	FileName string
+	Sn       uint32
+}
+
+type MapCompleteArgs struct {
+	FileName    string
+	TmpFileName string
+}
+
+type MapCompleteReply struct {
+
+}
+
+type ReduceArgs struct {
+	Reduce       int
+	Nreduce      int
+	TmpFileNames []string
+}
+
+type ReduceCompleteArgs struct {
+	Reduce int
+}
+
+type ReduceCompleteReply struct{
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.
