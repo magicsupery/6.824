@@ -26,6 +26,7 @@ func TestInitialElection2A(t *testing.T) {
 
 	cfg.begin("Test (2A): initial election")
 
+	fmt.Printf("2\n")
 	// is a leader elected?
 	cfg.checkOneLeader()
 

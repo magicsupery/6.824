@@ -17,7 +17,13 @@ package raft
 //   in the same server.
 //
 
-import "sync"
+import (
+	"context"
+	"fmt"
+	"math/rand"
+	"sync"
+	"time"
+)
 import "sync/atomic"
 import "../labrpc"
 
@@ -25,6 +31,12 @@ import "../labrpc"
 // import "../labgob"
 
 
+type NodeState int
+const (
+	follower  NodeState = iota
+	candidate
+	leader
+)
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -56,17 +68,34 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	currentState NodeState
+	currentTerm  uint64
+	votedFor     int
+	log          []string
 
+	commitIndex uint64
+	lastApplied uint64
+
+	nextIndex  map[int]uint64
+	matchIndex map[int]uint64
+
+	hasReceiveRpc bool // if received Rpc between election timeout
+	receivedVotes int
+
+	electionContext  context.Context
+	cancelFunc       context.CancelFunc
+	hasSendHeartbeat bool
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	var term int
-	var isleader bool
 	// Your code here (2A).
-	return term, isleader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	return int(rf.currentTerm), rf.currentState == leader
 }
 
 //
@@ -117,6 +146,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term uint64
+	CandidateId int
+	LastLogIndex uint64
+	LastLogTerm uint64
 }
 
 //
@@ -125,6 +158,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term uint64
+	VoteGranted bool
 }
 
 //
@@ -132,8 +167,63 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("raft %s got request vote", rf.who())
+	rf.hasReceiveRpc = true
+
+	//TODO up-to-date
+	if rf.currentTerm > args.Term{
+		reply.VoteGranted = false
+	}else{
+		if rf.currentTerm < args.Term{
+			rf.currentTerm = args.Term
+			rf.changeToFollower()
+		}
+
+		if rf.votedFor == -1{
+			reply.VoteGranted = true
+			reply.Term = rf.currentTerm
+			rf.votedFor = args.CandidateId
+		}
+	}
 }
 
+type AppendEntriesArgs struct {
+	Term uint64
+	LeaderId int
+	PrevLogIndex uint64
+	PrevLogTerm uint64
+	Entries []string
+	LeaderCommit uint64
+}
+
+type AppendEntriesReply struct {
+	Term uint64
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply){
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	//DPrintf("raft %s got append entries", rf.who())
+	rf.hasReceiveRpc = true
+	if rf.currentTerm > args.Term{
+		reply.Success = false
+		reply.Term = rf.currentTerm
+	}else{
+		if rf.currentTerm < args.Term{
+			rf.currentTerm = args.Term
+			rf.votedFor = -1
+		}
+		reply.Success = true
+		reply.Term = rf.currentTerm
+
+		if rf.currentState != follower{
+			rf.changeToFollower()
+		}
+	}
+}
 //
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
@@ -202,17 +292,180 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 // the issue is that long-running goroutines use memory and may chew
 // up CPU time, perhaps causing later tests to fail and generating
-// confusing debug output. any goroutine with a long-running loop
+// confusing debug output. any goroutine with a long-running electiontimeout
 // should call killed() to check whether it should stop.
 //
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.cancelFunc()
 }
 
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
+}
+
+func (rf *Raft) getElectionTimeout() time.Duration {
+	return time.Duration(rand.Intn(150) + 150) * time.Millisecond
+}
+
+func (rf *Raft) followerElectionTimeout(ctx context.Context) {
+	//get random expires timeout
+	select{
+		case <- time.After(rf.getElectionTimeout()):
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if !rf.hasReceiveRpc{
+				// change to candidate
+				rf.changeToCandidate()
+			} else{
+				//continue
+				rf.hasReceiveRpc = false
+				rf.cancelFunc()
+				rf.electionContext, rf.cancelFunc = context.WithCancel(context.Background())
+				go func(ctx context.Context){rf.followerElectionTimeout(ctx)}(rf.electionContext)
+			}
+
+		case <- ctx.Done():
+			_, _ = DPrintf("follower election time done")
+
+	}
+
+}
+
+func (rf *Raft) candidateElectionTimeout(ctx context.Context){
+	select{
+		case <- time.After(rf.getElectionTimeout()):
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			rf.changeToCandidate()
+		case <- ctx.Done():
+			_, _ = DPrintf("candidate election time done")
+	}
+}
+
+func (rf *Raft) leaderElectionTimeout(ctx context.Context) {
+	select{
+	case <- time.After(rf.getElectionTimeout() / 3):
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
+		//DPrintf("raft %s leader election timeout", rf.who())
+		if !rf.hasSendHeartbeat{
+			rf.sendAllAppendEntries()
+		}
+
+		//continue
+		rf.hasSendHeartbeat = false
+		rf.cancelFunc()
+		rf.electionContext, rf.cancelFunc = context.WithCancel(context.Background())
+		go func(ctx context.Context){rf.leaderElectionTimeout(ctx)}(rf.electionContext)
+	case <- ctx.Done():
+		_, _ = DPrintf("leader election time done")
+	}
+}
+//changeTo function need lock outside by caller
+func (rf *Raft) changeToFollower(){
+	DPrintf("raft %s change to follower ", rf.who())
+	rf.currentState = follower
+	rf.votedFor = -1
+	rf.hasReceiveRpc = false
+
+	//reset timer
+	rf.cancelFunc()
+	rf.electionContext, rf.cancelFunc = context.WithCancel(context.Background())
+	go func(ctx context.Context) {rf.followerElectionTimeout(ctx)}(rf.electionContext)
+}
+
+func (rf *Raft) changeToCandidate(){
+	DPrintf("raft %s change to candidate ", rf.who())
+	rf.currentState = candidate
+	rf.currentTerm += 1
+	rf.votedFor = rf.me
+	rf.receivedVotes = 1
+	// reset timer
+	rf.cancelFunc()
+	rf.electionContext, rf.cancelFunc = context.WithCancel(context.Background())
+	go func(ctx context.Context) {rf.candidateElectionTimeout(ctx)}(rf.electionContext)
+	rf.sendAllRequestVote()
+}
+
+func (rf *Raft) changeToLeader() {
+	DPrintf("raft %s change to leader ", rf.who())
+	rf.currentState = leader
+	rf.sendAllAppendEntries()
+
+	//reset timer
+	rf.cancelFunc()
+	rf.electionContext, rf.cancelFunc = context.WithCancel(context.Background())
+	rf.hasSendHeartbeat = false
+	go func(ctx context.Context) {rf.leaderElectionTimeout(ctx)}(rf.electionContext)
+}
+
+func (rf *Raft) majority() int {
+	return len(rf.peers) / 2 + 1
+}
+
+func (rf *Raft) sendAllRequestVote(){
+	for index, peer := range rf.peers{
+		if index == rf.me{
+			continue
+		}
+		go func(term uint64, id int, myPeer *labrpc.ClientEnd){
+			args := RequestVoteArgs{}
+			args.Term = term
+			args.CandidateId = id
+			reply := RequestVoteReply{}
+			ok := myPeer.Call("Raft.RequestVote", &args, &reply)
+			DPrintf("got request vote rpc ok %v", ok)
+			if ok{
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+
+				if rf.currentState != candidate{
+					return
+				}
+
+				DPrintf("reply VoteGranted %v", reply.VoteGranted)
+				if reply.VoteGranted{
+					rf.receivedVotes += 1
+					if rf.receivedVotes >= rf.majority(){
+						// change to leader
+						rf.changeToLeader()
+					}
+				}else{
+					if reply.Term > rf.currentTerm{
+						rf.changeToFollower()
+					}
+				}
+			}
+		}(rf.currentTerm, rf.me, peer)
+	}
+}
+
+func (rf *Raft) sendAllAppendEntries(){
+	rf.hasSendHeartbeat = true
+	for index, peer := range rf.peers{
+		if index == rf.me{
+			continue
+		}
+
+		go func(term uint64, myPeer *labrpc.ClientEnd){
+			args := AppendEntriesArgs{}
+			args.Term = term
+			reply := AppendEntriesReply{}
+			ok := myPeer.Call("Raft.AppendEntries", &args, &reply)
+			if ok{
+			}
+		}(rf.currentTerm, peer)
+	}
+}
+
+func (rf *Raft) who() string {
+	return fmt.Sprintf("(%d, %d)", rf.me, rf.currentTerm)
 }
 
 //
@@ -234,10 +487,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.currentTerm = 0
+	rf.commitIndex = 0
+	rf.lastApplied = 0
 
+	rf.nextIndex = make(map[int]uint64)
+	rf.matchIndex = make(map[int]uint64)
+
+	rf.electionContext, rf.cancelFunc = context.WithCancel(context.Background())
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	rf.changeToFollower()
 
+	DPrintf("create raft peer %d", me)
 	return rf
 }
+
