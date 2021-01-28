@@ -72,6 +72,7 @@ type Raft struct {
 	currentTerm  uint64
 	votedFor     int
 	log          []string
+	logTerm 	 []uint64
 
 	commitIndex uint64
 	lastApplied uint64
@@ -175,16 +176,22 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//TODO up-to-date
 	if rf.currentTerm > args.Term{
 		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
 	}else{
 		if rf.currentTerm < args.Term{
 			rf.currentTerm = args.Term
 			rf.changeToFollower()
 		}
 
-		if rf.votedFor == -1{
+		if rf.votedFor == -1 &&
+			((args.LastLogTerm > rf.getLastLogTerm()) ||
+				(args.LastLogTerm == rf.getLastLogTerm() && args.LastLogIndex >= rf.getLastLogIndex())){
 			reply.VoteGranted = true
 			reply.Term = rf.currentTerm
 			rf.votedFor = args.CandidateId
+		}else{
+			reply.VoteGranted = false
+			reply.Term = rf.currentTerm
 		}
 	}
 }
@@ -214,14 +221,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}else{
 		if rf.currentTerm < args.Term{
 			rf.currentTerm = args.Term
-			rf.votedFor = -1
+			rf.changeToFollower()
 		}
 		reply.Success = true
 		reply.Term = rf.currentTerm
 
-		if rf.currentState != follower{
-			rf.changeToFollower()
-		}
 	}
 }
 //
@@ -414,23 +418,24 @@ func (rf *Raft) sendAllRequestVote(){
 		if index == rf.me{
 			continue
 		}
-		go func(term uint64, id int, myPeer *labrpc.ClientEnd){
+		go func(term uint64, id int, lastLogTerm uint64, lastLogIndex uint64, myPeer *labrpc.ClientEnd){
 			args := RequestVoteArgs{}
 			args.Term = term
 			args.CandidateId = id
 			reply := RequestVoteReply{}
 			ok := myPeer.Call("Raft.RequestVote", &args, &reply)
-			DPrintf("got request vote rpc ok %v", ok)
+			//DPrintf("got request vote rpc ok %v", ok)
 			if ok{
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 
-				if rf.currentState != candidate{
-					return
-				}
 
 				DPrintf("reply VoteGranted %v", reply.VoteGranted)
 				if reply.VoteGranted{
+					if rf.currentState != candidate{
+						return
+					}
+
 					rf.receivedVotes += 1
 					if rf.receivedVotes >= rf.majority(){
 						// change to leader
@@ -438,11 +443,12 @@ func (rf *Raft) sendAllRequestVote(){
 					}
 				}else{
 					if reply.Term > rf.currentTerm{
+						rf.currentTerm = reply.Term
 						rf.changeToFollower()
 					}
 				}
 			}
-		}(rf.currentTerm, rf.me, peer)
+		}(rf.currentTerm, rf.me, rf.getLastLogTerm(), rf.getLastLogIndex(), peer)
 	}
 }
 
@@ -459,6 +465,18 @@ func (rf *Raft) sendAllAppendEntries(){
 			reply := AppendEntriesReply{}
 			ok := myPeer.Call("Raft.AppendEntries", &args, &reply)
 			if ok{
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+
+				if reply.Term > rf.currentTerm{
+					rf.currentTerm = reply.Term
+					rf.changeToFollower()
+					return
+				}
+
+				if !reply.Success{
+					//resend
+				}
 			}
 		}(rf.currentTerm, peer)
 	}
@@ -466,6 +484,19 @@ func (rf *Raft) sendAllAppendEntries(){
 
 func (rf *Raft) who() string {
 	return fmt.Sprintf("(%d, %d)", rf.me, rf.currentTerm)
+}
+
+func (rf *Raft) getLastLogTerm() uint64{
+	num := len(rf.log)
+	if num > 0{
+		return rf.logTerm[num - 1]
+	}else{
+		return 0
+	}
+}
+
+func (rf *Raft) getLastLogIndex() uint64{
+	return uint64(len(rf.log))
 }
 
 //
@@ -500,7 +531,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.changeToFollower()
 
-	DPrintf("create raft peer %d", me)
+	DPrintf("create raft peer %s", rf.who())
 	return rf
 }
 
