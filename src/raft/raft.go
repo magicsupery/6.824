@@ -213,6 +213,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term uint64
 	Success bool
+	XTerm  uint64
+	XIndex uint64
+	XLen   int64
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply){
@@ -241,10 +244,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			//follower index not found
 			if rf.getLastLogIndex() < args.PrevLogIndex{
 				reply.Success = false
+				reply.XLen = int64(len(rf.log))
 			}else{
 				//follower not match
-				if rf.log[args.PrevLogIndex - 1].Term != args.PrevLogTerm{
+				prevLogTerm := rf.log[args.PrevLogIndex - 1].Term
+				if prevLogTerm != args.PrevLogTerm{
 					reply.Success = false
+					reply.XTerm = prevLogTerm
+					reply.XIndex = args.PrevLogIndex
+					index := args.PrevLogIndex - 1
+					for index > 0{
+						if rf.log[index - 1].Term == prevLogTerm{
+							reply.XIndex = index
+						}else{
+							break
+						}
+						index -= 1
+					}
 				}else{
 					//follower match
 					reply.Success = true
@@ -557,7 +573,7 @@ func(rf *Raft) sendSingleAppendEntries(peer *labrpc.ClientEnd, index int, isHear
 		log = make([]Log, lastLogIndex - nextIndex + 1)
 		copy(log, rf.log[nextIndex - 1: lastLogIndex])
 		prevLogIndex = rf.getPrevLogIndex(nextIndex)
-		prevLogTerm = rf.getPrevLogTerm(nextIndex)
+		prevLogTerm = rf.getPrevLogTerm(prevLogIndex)
 	}else{
 		if !isHeartbeat{
 			//if not heartbeat must have update
@@ -587,6 +603,10 @@ func (rf *Raft) realSendAppendEntries(peer *labrpc.ClientEnd, index int, term ui
 	args.Entries = log
 	args.LeaderCommit = leaderCommit
 	reply := AppendEntriesReply{}
+	reply.XLen = -1
+	reply.XTerm = 0
+	reply.XIndex = 0
+
 	ok := peer.Call("Raft.AppendEntries", &args, &reply)
 
 	rf.mu.Lock()
@@ -599,39 +619,66 @@ func (rf *Raft) realSendAppendEntries(peer *labrpc.ClientEnd, index int, term ui
 		}
 
 		//heatbeat or state already changed , ignore
-		if rf.currentState != leader || len(log) == 0{
+		if rf.currentState != leader{
 			return
 		}
 
 		// need adjust nextIndex
 		if reply.Success{
-			newNextIndex := prevLogIndex + uint64(len(log)) + 1
-			if newNextIndex > rf.nextIndex[index]{
-				rf.nextIndex[index] = prevLogIndex + uint64(len(log)) + 1
-				rf.matchIndex[index] = rf.nextIndex[index] - 1
-				DPrintf("raft %s increase follower %d next index to %d, match index to %d",
-					rf.who(), index, rf.nextIndex[index], rf.matchIndex[index])
+			if len(log) != 0{
+				newNextIndex := prevLogIndex + uint64(len(log)) + 1
+				if newNextIndex > rf.nextIndex[index]{
+					rf.nextIndex[index] = prevLogIndex + uint64(len(log)) + 1
+					rf.matchIndex[index] = rf.nextIndex[index] - 1
+					DPrintf("raft %s increase follower %d next index to %d, match index to %d",
+						rf.who(), index, rf.nextIndex[index], rf.matchIndex[index])
 
-				//check if majority match index
-				majorityNum := rf.majority()
-				matchedNum := 0
-				N := rf.matchIndex[index]
-				for _, cmp := range rf.matchIndex{
-					if cmp >= N{
-						matchedNum += 1
-						if matchedNum >= majorityNum{
-							rf.commitLogs(N)
-							break
+					//check if majority match index
+					majorityNum := rf.majority()
+					matchedNum := 0
+					N := rf.matchIndex[index]
+					for _, cmp := range rf.matchIndex{
+						if cmp >= N{
+							matchedNum += 1
+							if matchedNum >= majorityNum{
+								rf.commitLogs(N)
+								break
+							}
 						}
 					}
 				}
 			}
-
 		}else{
-			if rf.nextIndex[index] != 1{
-				rf.nextIndex[index]	-= 1
+			//if rf.nextIndex[index] != 1{
+			//	rf.nextIndex[index]	-= 1
+			//}else{
+			//	DPrintf("raft %s got critical error nextIndex is 1 but failed", rf.who())
+			//}
+
+			//adjust next index
+			if reply.XLen != -1{
+				//the follower len not match
+				rf.nextIndex[index] = uint64(reply.XLen + 1)
 			}else{
-				DPrintf("raft %s got critical error nextIndex is 1 but failed", rf.who())
+				//index match, check xterm
+				if reply.XTerm != 0{
+					pivot := reply.XIndex
+					if rf.log[pivot - 1].Term != reply.XTerm{
+						rf.nextIndex[index] = pivot
+					}else{
+						i := pivot + 1
+						for i < rf.nextIndex[index]{
+							if rf.log[i - 1].Term != reply.XTerm{
+								rf.nextIndex[index] = i
+								break
+							}
+						}
+					}
+				}else{
+					rf.nextIndex[index] -= 1
+				}
+				DPrintf("raft %s adjust peer %d next index to %d, from reply %v",
+					rf.who(), index, rf.nextIndex[index], reply)
 			}
 			rf.sendSingleAppendEntries(peer, index, false)
 		}
