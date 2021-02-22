@@ -8,9 +8,7 @@ package raft
 // test with the original before submitting.
 //
 
-import "6.824/labgob"
 import "6.824/labrpc"
-import "bytes"
 import "log"
 import "sync"
 import "testing"
@@ -178,43 +176,43 @@ const SnapShotInterval = 10
 
 // periodically snapshot raft state
 func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
-	for m := range applyCh {
-		if m.SnapshotValid {
-			if cfg.rafts[i].CondInstallSnapshot(m.SnapshotTerm,
-				m.SnapshotIndex, m.Snapshot) {
-				cfg.logs[i] = make(map[int]interface{})
-				r := bytes.NewBuffer(m.Snapshot)
-				d := labgob.NewDecoder(r)
-				var v int
-				if d.Decode(&v) != nil {
-					log.Fatalf("decode error\n")
-				}
-				cfg.logs[i][m.SnapshotIndex] = v
-			}
-		} else if m.CommandValid {
-			cfg.mu.Lock()
-			err_msg, prevok := cfg.checkLogs(i, m)
-			cfg.mu.Unlock()
-			if m.CommandIndex > 1 && prevok == false {
-				err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.CommandIndex)
-			}
-			if err_msg != "" {
-				log.Fatalf("apply error: %v\n", err_msg)
-				cfg.applyErr[i] = err_msg
-				// keep reading after error so that Raft doesn't block
-				// holding locks...
-			}
-			if (m.CommandIndex+1)%SnapShotInterval == 0 {
-				w := new(bytes.Buffer)
-				e := labgob.NewEncoder(w)
-				v := m.Command
-				e.Encode(v)
-				cfg.rafts[i].Snapshot(m.CommandIndex, w.Bytes())
-			}
-		} else {
-			// ignore other types of ApplyMsg
-		}
-	}
+	//for m := range applyCh {
+	//	if m.SnapshotValid {
+	//		if cfg.rafts[i].CondInstallSnapshot(m.SnapshotTerm,
+	//			m.SnapshotIndex, m.Snapshot) {
+	//			cfg.logs[i] = make(map[int]interface{})
+	//			r := bytes.NewBuffer(m.Snapshot)
+	//			d := labgob.NewDecoder(r)
+	//			var v int
+	//			if d.Decode(&v) != nil {
+	//				log.Fatalf("decode error\n")
+	//			}
+	//			cfg.logs[i][m.SnapshotIndex] = v
+	//		}
+	//	} else if m.CommandValid {
+	//		cfg.mu.Lock()
+	//		err_msg, prevok := cfg.checkLogs(i, m)
+	//		cfg.mu.Unlock()
+	//		if m.CommandIndex > 1 && prevok == false {
+	//			err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.CommandIndex)
+	//		}
+	//		if err_msg != "" {
+	//			log.Fatalf("apply error: %v\n", err_msg)
+	//			cfg.applyErr[i] = err_msg
+	//			// keep reading after error so that Raft doesn't block
+	//			// holding locks...
+	//		}
+	//		if (m.CommandIndex+1)%SnapShotInterval == 0 {
+	//			w := new(bytes.Buffer)
+	//			e := labgob.NewEncoder(w)
+	//			v := m.Command
+	//			e.Encode(v)
+	//			cfg.rafts[i].Snapshot(m.CommandIndex, w.Bytes())
+	//		}
+	//	} else {
+	//		// ignore other types of ApplyMsg
+	//	}
+	//}
 }
 
 //
