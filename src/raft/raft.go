@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"sort"
 	"sync"
 	"time"
 )
@@ -678,7 +679,7 @@ func (rf *Raft) realSendAppendEntries(peer *labrpc.ClientEnd, index int, term ui
 			return
 		}
 
-		//heatbeat or state already changed , ignore
+		//state already changed , ignore
 		if rf.currentState != leader{
 			return
 		}
@@ -695,19 +696,32 @@ func (rf *Raft) realSendAppendEntries(peer *labrpc.ClientEnd, index int, term ui
 
 					// update leader commit index
 					if rf.commitIndex < rf.matchIndex[index]{
-						//check if majority match index
-						majorityNum := rf.majority()
-						matchedNum := 0
-						N := rf.matchIndex[index]
-						for _, cmp := range rf.matchIndex{
-							if cmp >= N{
-								matchedNum += 1
-								if matchedNum >= majorityNum{
-									rf.commitLogs(N)
-									break
-								}
-							}
+						//find a property N
+						matchIndexes := make([]uint64, 0, len(rf.matchIndex))
+
+						for _, N := range rf.matchIndex{
+							matchIndexes = append(matchIndexes, N)
 						}
+
+						sort.Slice(matchIndexes, func(i, j int) bool {return matchIndexes[i]< matchIndexes[j]})
+
+						to := matchIndexes[rf.majority() - 1]
+						if rf.commitIndex < to{
+							rf.commitLogs(to)
+						}
+						//check if majority match index
+						//majorityNum := rf.majority()
+						//matchedNum := 0
+						//N := rf.matchIndex[index]
+						//for _, cmp := range rf.matchIndex{
+						//	if cmp >= N{
+						//		matchedNum += 1
+						//		if matchedNum >= majorityNum{
+						//			rf.commitLogs(N)
+						//			break
+						//		}
+						//	}
+						//}
 					}
 				}
 			}
@@ -751,7 +765,12 @@ func (rf *Raft) realSendAppendEntries(peer *labrpc.ClientEnd, index int, term ui
 
 
 func (rf *Raft) who() string {
-	return fmt.Sprintf("(%d, %d, Logs %v, commitIndex %v) ", rf.me, rf.CurrentTerm, len(rf.Logs), rf.commitIndex)
+	maxLen := 10
+	if len(rf.Logs) < 10{
+		maxLen = len(rf.Logs)
+	}
+
+	return fmt.Sprintf("(%d, %d, Logs(%v) %v, commitIndex %v) ", rf.me, rf.CurrentTerm, len(rf.Logs), rf.Logs[:maxLen], rf.commitIndex)
 }
 
 func (rf *Raft) getLastLogTerm() uint64{
@@ -784,8 +803,8 @@ func (rf *Raft) getPrevLogTerm(pivotIndex uint64) uint64{
 }
 
 func (rf *Raft) commitLogs(to uint64) {
-	DPrintf("raft %s commitLogs to %d", rf.who(), to)
 	from := rf.commitIndex
+	DPrintf("raft %s commitLogs to %d from %d", rf.who(), to, from)
 	var applyMsg ApplyMsg
 	if from <= to{
 		//add index
