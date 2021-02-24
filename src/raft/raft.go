@@ -304,6 +304,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				}else{
 					//follower match
 					reply.Success = true
+
+					resLen := args.PrevLogIndex + uint64(len(args.Entries))
 					for index, entry := range args.Entries{
 						pivot := args.PrevLogIndex + uint64(index) + 1
 						if uint64(len(rf.Logs)) < pivot{
@@ -312,6 +314,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 							rf.Logs[pivot - 1] = entry
 						}
 					}
+
+					// remove not valid logs
+					if uint64(len(rf.Logs)) > resLen && resLen > 0 &&
+						rf.Logs[resLen].Term < rf.Logs[resLen - 1].Term{
+							rf.Logs = rf.Logs[:resLen]
+						}
+
 					rf.persist()
 				}
 			}
