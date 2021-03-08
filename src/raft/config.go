@@ -136,6 +136,12 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 	for j := 0; j < len(cfg.logs); j++ {
 		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
 			log.Printf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
+
+			log.Printf("print all peer logs start")
+			for index, v := range cfg.logs{
+				log.Printf("%v: log %v", index, v)
+			}
+			log.Printf("print all peer logs end")
 			// some server has already committed a different value for this entry!
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)

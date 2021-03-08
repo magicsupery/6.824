@@ -503,7 +503,7 @@ func (rf *Raft) leaderElectionTimeout(ctx context.Context) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 
-		//DPrintf("raft %s leader election timeout", rf.who())
+		DPrintf("raft %s leader election timeout", rf.who())
 		rf.sendAllAppendEntries(true)
 
 		//continue
@@ -695,43 +695,41 @@ func (rf *Raft) realSendAppendEntries(peer *labrpc.ClientEnd, index int, term ui
 
 		// need adjust nextIndex
 		if reply.Success{
-			if len(log) != 0{
-				newNextIndex := prevLogIndex + uint64(len(log)) + 1
-				if newNextIndex > rf.nextIndex[index]{
-					rf.nextIndex[index] = prevLogIndex + uint64(len(log)) + 1
-					rf.matchIndex[index] = rf.nextIndex[index] - 1
-					DPrintf("raft %s increase follower %d next index to %d, match index to %d",
-						rf.who(), index, rf.nextIndex[index], rf.matchIndex[index])
+			newNextIndex := prevLogIndex + uint64(len(log)) + 1
+			if newNextIndex > rf.nextIndex[index] || rf.matchIndex[index] == 0{
+				rf.nextIndex[index] = prevLogIndex + uint64(len(log)) + 1
+				rf.matchIndex[index] = rf.nextIndex[index] - 1
+				DPrintf("raft %s increase follower %d next index to %d, match index to %d",
+					rf.who(), index, rf.nextIndex[index], rf.matchIndex[index])
 
-					// update leader commit index
-					if rf.commitIndex < rf.matchIndex[index]{
-						//find a property N
-						matchIndexes := make([]uint64, 0, len(rf.matchIndex))
+				// update leader commit index
+				if rf.commitIndex < rf.matchIndex[index]{
+					//find a property N
+					matchIndexes := make([]uint64, 0, len(rf.matchIndex))
 
-						for _, N := range rf.matchIndex{
-							matchIndexes = append(matchIndexes, N)
-						}
-
-						sort.Slice(matchIndexes, func(i, j int) bool {return matchIndexes[i]< matchIndexes[j]})
-
-						to := matchIndexes[rf.majority() - 1]
-						if rf.commitIndex < to{
-							rf.commitLogs(to)
-						}
-						//check if majority match index
-						//majorityNum := rf.majority()
-						//matchedNum := 0
-						//N := rf.matchIndex[index]
-						//for _, cmp := range rf.matchIndex{
-						//	if cmp >= N{
-						//		matchedNum += 1
-						//		if matchedNum >= majorityNum{
-						//			rf.commitLogs(N)
-						//			break
-						//		}
-						//	}
-						//}
+					for _, N := range rf.matchIndex{
+						matchIndexes = append(matchIndexes, N)
 					}
+
+					sort.Slice(matchIndexes, func(i, j int) bool {return matchIndexes[i]< matchIndexes[j]})
+
+					to := matchIndexes[rf.majority() - 1]
+					if rf.commitIndex < to{
+						rf.commitLogs(to)
+					}
+					//check if majority match index
+					//majorityNum := rf.majority()
+					//matchedNum := 0
+					//N := rf.matchIndex[index]
+					//for _, cmp := range rf.matchIndex{
+					//	if cmp >= N{
+					//		matchedNum += 1
+					//		if matchedNum >= majorityNum{
+					//			rf.commitLogs(N)
+					//			break
+					//		}
+					//	}
+					//}
 				}
 			}
 		}else{
