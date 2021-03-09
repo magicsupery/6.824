@@ -4,6 +4,7 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,9 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Key   string
+	Value string
+	Command string // Get Put or Append
 }
 
 type KVServer struct {
@@ -32,18 +36,55 @@ type KVServer struct {
 	applyCh chan raft.ApplyMsg
 	dead    int32 // set by Kill()
 
-	maxraftstate int // snapshot if log grows this big
+	maxraftstate int
+	// snapshot if log grows this big
 
 	// Your definitions here.
+	closed       chan int
+	indexToWaitChannel sync.Map
+	keyToValue	 map[string]string
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	op := Op{
+		Key: args.Key,
+		Command: "Get",
+	}
+
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader{
+		reply.Err = "NotLeader"
+	}else{
+		//wait for the command to commit
+		waitChan := make(chan interface{})
+		kv.indexToWaitChannel.Store(index, waitChan)
+
+		result := <- waitChan
+		reply.Value = result.(string)
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	op := Op{
+		Key: args.Key,
+		Value: args.Value,
+		Command: args.Op,
+	}
+
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader{
+		reply.Err = "NotLeader"
+	}else{
+		//wait for the command to commit
+		waitChan := make(chan interface{})
+		DPrintf("server %s store waitchan with index %d", kv.who(), index)
+		kv.indexToWaitChannel.Store(index, waitChan)
+
+		<- waitChan
+	}
 }
 
 //
@@ -60,11 +101,53 @@ func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
+	close(kv.closed)
 }
 
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) watchCommit() {
+	go func(){
+		for{
+			select{
+			case command := <- kv.applyCh:
+				DPrintf("server %s got command %v ", kv.who(), command)
+				index, op := command.CommandIndex, command.Command.(Op)
+
+				if waitChan, ok := kv.indexToWaitChannel.Load(index); ok{
+					if op.Command == "Get"{
+						if val, ok := kv.keyToValue[op.Key]; ok{
+							waitChan.(chan interface{}) <- val
+						}else{
+							waitChan.(chan interface{}) <- ""
+						}
+					}else if op.Command == "Put"{
+						kv.keyToValue[op.Key] = op.Value
+						waitChan.(chan interface{}) <- ""
+					}else if op.Command == "Append"{
+						if val, ok := kv.keyToValue[op.Key]; ok{
+							kv.keyToValue[op.Key] = val + op.Value
+						}else{
+							kv.keyToValue[op.Key] = op.Value
+						}
+
+						waitChan.(chan interface{}) <- ""
+					}
+				}
+
+			case <- kv.closed:
+				DPrintf("server %s watchCommit closed", kv.who())
+				return
+			}
+		}
+	}()
+}
+
+func (kv *KVServer) who() string {
+	return fmt.Sprintf("(%d)", kv.me)
 }
 
 //
@@ -96,6 +179,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.closed = make(chan int)
+	kv.keyToValue = make(map[string]string)
+	kv.watchCommit()
 
 	return kv
 }
