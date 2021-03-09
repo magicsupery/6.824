@@ -52,7 +52,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		Key: args.Key,
 		Command: "Get",
 	}
-
+	DPrintf("server %s Get args %v", kv.who(), args)
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader{
 		reply.Err = "NotLeader"

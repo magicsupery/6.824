@@ -58,9 +58,11 @@ func (ck *Clerk) Get(key string) string {
 	ck.servers[sendIndex].Call("KVServer.Get", &args, &reply)
 	for reply.Err == "NotLeader"{
 		sendIndex = ck.adjustSendIndex(sendIndex)
+		reply.Err = ""
 		ck.servers[sendIndex].Call("KVServer.Get", &args, &reply)
 	}
 
+	DPrintf("send get %s end", key)
 	ck.setLeaderIndex(sendIndex)
 	return reply.Value
 }
