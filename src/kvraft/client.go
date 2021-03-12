@@ -2,6 +2,8 @@ package kvraft
 
 import (
 	"6.824/labrpc"
+	"fmt"
+	"github.com/google/uuid"
 	"sync"
 )
 import "crypto/rand"
@@ -14,6 +16,8 @@ type Clerk struct {
 	mutex sync.RWMutex
 	leader int
 	sendIndex int
+	opIndex int
+	id string
 }
 
 func nrand() int64 {
@@ -28,6 +32,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.leader = -1
+	ck.sendIndex = 0
+	ck.opIndex = 1
+	ck.id = uuid.New().String()
 	return ck
 }
 
@@ -44,26 +51,43 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-	DPrintf("send get %s", key)
 	// You will have to modify this function.
 	sendIndex := ck.getSendIndex()
 
 	args := GetArgs{
 		Key: key,
+		ClientId: ck.id,
+		OpIndex: ck.opIndex,
 	}
+
+	DPrintf("client %s send get %s to %d with arg %v ", ck.who(), key, sendIndex, args)
 	reply := GetReply{
 		Err: "",
 	}
 
-	ck.servers[sendIndex].Call("KVServer.Get", &args, &reply)
-	for reply.Err == "NotLeader"{
-		sendIndex = ck.adjustSendIndex(sendIndex)
-		reply.Err = ""
-		ck.servers[sendIndex].Call("KVServer.Get", &args, &reply)
+	ck.opIndex += 1
+
+	ok := false
+	for !ok{
+		ok = ck.servers[sendIndex].Call("KVServer.Get", &args, &reply)
 	}
 
-	DPrintf("send get %s end", key)
+	for reply.Err != ""{
+		if reply.Err == ErrWrongLeader || reply.Err == ErrLeaderChanged{
+			sendIndex = ck.adjustSendIndex(sendIndex)
+		}
+
+		reply.Err = ""
+		ok = false
+		for !ok{
+			ok = ck.servers[sendIndex].Call("KVServer.Get", &args, &reply)
+		}
+	}
+
+
 	ck.setLeaderIndex(sendIndex)
+
+	DPrintf("client %s send get %s to %d with arg %v end", ck.who(), key, sendIndex, args)
 	return reply.Value
 }
 
@@ -86,21 +110,38 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		Key: key,
 		Value: value,
 		Op: op,
+		Id: uuid.New().String(),
+		PrevIndex: 0,
+		ClientId: ck.id,
+		OpIndex: ck.opIndex,
 	}
 
+	DPrintf("client %s send putappend %s to %d with arg %v ", ck.who(), key, sendIndex, args)
+
+	ck.opIndex += 1
 	reply := PutAppendReply{
 		Err: "",
 	}
+	ok := false
+	for !ok{
+		ok = ck.servers[sendIndex].Call("KVServer.PutAppend", &args, &reply)
+	}
 
-	ck.servers[sendIndex].Call("KVServer.PutAppend", &args, &reply)
-	for reply.Err == "NotLeader"{
-		sendIndex = ck.adjustSendIndex(sendIndex)
+	for reply.Err != ""{
+		if reply.Err == ErrWrongLeader || reply.Err == ErrLeaderChanged{
+			sendIndex = ck.adjustSendIndex(sendIndex)
+		}
+
 		reply.Err = ""
-		ck.servers[sendIndex].Call("KVServer.PutAppend", &args, &reply)
-		DPrintf("1 send index %d, reply err %s", sendIndex, reply.Err)
+		ok = false
+		for !ok{
+			ok = ck.servers[sendIndex].Call("KVServer.PutAppend", &args, &reply)
+		}
 	}
 
 	ck.setLeaderIndex(sendIndex)
+
+	DPrintf("client %s send putappend %s to %d with arg %v end", ck.who(), key, sendIndex, args)
 	return
 }
 
@@ -142,4 +183,8 @@ func (ck *Clerk) setLeaderIndex(i int) {
 	ck.mutex.Lock()
 	defer ck.mutex.Unlock()
 	ck.leader = i
+}
+
+func (ck *Clerk) who() string {
+	return fmt.Sprintf("(%s)", ck.id)
 }

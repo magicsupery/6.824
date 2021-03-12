@@ -67,6 +67,16 @@ type Log struct{
 	Command interface{}
 	Term uint64
 }
+
+type ServiceMessage struct{
+	MessageType string
+	Obj interface{}
+}
+
+type LeaderChange struct {
+	CommitIndex uint64
+	LogIndex uint64
+}
 //
 // A Go object implementing a single Raft peer.
 //
@@ -117,6 +127,13 @@ func (rf *Raft) GetState() (int, bool) {
 	return int(rf.CurrentTerm), rf.currentState == leader
 }
 
+func (rf *Raft) GetLog(index int)(bool, interface{}){
+	if index > len(rf.Logs){
+		return false, nil
+	}
+
+	return true, rf.Logs[index - 1].Command
+}
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -410,9 +427,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader = rf.currentState == leader
 	if isLeader{
 		//go func(){
-			//push new entries
+			//PUSH NEW ENTRIES
 			//rf.mu.Lock()
 			//defer rf.mu.Unlock()
+			DPrintf("raft %s append log %v", rf.who(), command)
 			rf.Logs = append(rf.Logs, Log{command, rf.CurrentTerm})
 			rf.persist()
 			rf.sendAllAppendEntries(false)
@@ -521,6 +539,17 @@ func (rf *Raft) leaderElectionTimeout(ctx context.Context) {
 //changeTo function need lock outside by caller
 func (rf *Raft) changeToFollower(){
 	DPrintf("raft %s change to follower ", rf.who())
+	// leader to follower, need notify service commit index, log index, make not commit service to retry
+	if rf.currentState == leader{
+		DPrintf("raft %s change to follower from leader, need notify", rf.who())
+		rf.applyCh <- ApplyMsg{
+			true,
+			ServiceMessage{"leaderChange",
+				LeaderChange{rf.commitIndex, rf.getLastLogIndex()}},
+			int(rf.commitIndex),
+		}
+	}
+
 	rf.currentState = follower
 	//rf.VotedFor = -1
 	rf.hasReceiveRpc = false
@@ -864,7 +893,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-
+	rf.currentState = follower
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.applyCh = applyCh
@@ -889,3 +918,4 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	return rf
 }
+
