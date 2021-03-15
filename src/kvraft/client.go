@@ -54,40 +54,35 @@ func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	sendIndex := ck.getSendIndex()
 
+	opid := uuid.New().String()
 	args := GetArgs{
 		Key: key,
-		ClientId: ck.id,
-		OpIndex: ck.opIndex,
+		OpId: opid,
 	}
 
-	DPrintf("client %s send get %s to %d with arg %v ", ck.who(), key, sendIndex, args)
+	DPrintf("client %s send get(%s) (%s to %d) with arg %v ", ck.who(), opid, key, sendIndex, args)
 	reply := GetReply{
 		Err: "",
 	}
 
 	ck.opIndex += 1
 
-	ok := false
-	for !ok{
-		ok = ck.servers[sendIndex].Call("KVServer.Get", &args, &reply)
-	}
+	ok := ck.servers[sendIndex].Call("KVServer.Get", &args, &reply)
 
-	for reply.Err != ""{
-		if reply.Err == ErrWrongLeader || reply.Err == ErrLeaderChanged{
+	for !ok || reply.Err != ""{
+		DPrintf("client %s send get(%s) to %d got ok(%v) Error(%s)", ck.who(), opid, sendIndex, ok, reply.Err)
+		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrLeaderChanged{
 			sendIndex = ck.adjustSendIndex(sendIndex)
 		}
 
 		reply.Err = ""
-		ok = false
-		for !ok{
-			ok = ck.servers[sendIndex].Call("KVServer.Get", &args, &reply)
-		}
+		ok = ck.servers[sendIndex].Call("KVServer.Get", &args, &reply)
 	}
 
 
 	ck.setLeaderIndex(sendIndex)
 
-	DPrintf("client %s send get %s to %d with arg %v end", ck.who(), key, sendIndex, args)
+	DPrintf("client %s send get(%s) (%s to %d) with arg %v end", ck.who(), opid, key, sendIndex, args)
 	return reply.Value
 }
 
@@ -104,44 +99,41 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 
+	opid := uuid.New().String()
 	sendIndex := ck.getSendIndex()
 
 	args := PutAppendArgs{
 		Key: key,
 		Value: value,
 		Op: op,
-		Id: uuid.New().String(),
-		PrevIndex: 0,
 		ClientId: ck.id,
 		OpIndex: ck.opIndex,
+		OpId: opid,
 	}
 
-	DPrintf("client %s send putappend %s to %d with arg %v ", ck.who(), key, sendIndex, args)
+	DPrintf("client %s send putappend(%s) (%s to %d) with arg %v ", ck.who(), opid, key, sendIndex, args)
 
 	ck.opIndex += 1
 	reply := PutAppendReply{
 		Err: "",
 	}
-	ok := false
-	for !ok{
-		ok = ck.servers[sendIndex].Call("KVServer.PutAppend", &args, &reply)
-	}
 
-	for reply.Err != ""{
-		if reply.Err == ErrWrongLeader || reply.Err == ErrLeaderChanged{
+	ok := ck.servers[sendIndex].Call("KVServer.PutAppend", &args, &reply)
+
+	for !ok || reply.Err != ""{
+		DPrintf("client %s send putappend(%s) to %d got ok(%v) Error(%s)", ck.who(), opid, sendIndex, ok, reply.Err)
+		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrLeaderChanged{
 			sendIndex = ck.adjustSendIndex(sendIndex)
 		}
 
 		reply.Err = ""
-		ok = false
-		for !ok{
-			ok = ck.servers[sendIndex].Call("KVServer.PutAppend", &args, &reply)
-		}
+		ok = ck.servers[sendIndex].Call("KVServer.PutAppend", &args, &reply)
 	}
 
 	ck.setLeaderIndex(sendIndex)
 
-	DPrintf("client %s send putappend %s to %d with arg %v end", ck.who(), key, sendIndex, args)
+	DPrintf("client %s send putappend(%s) (%s to %d) with arg %v reply %v end",
+		ck.who(), opid, key, sendIndex, args, reply)
 	return
 }
 
@@ -171,6 +163,12 @@ func (ck *Clerk) getSendIndex() int {
 func (ck *Clerk) adjustSendIndex(i int) int {
 	ck.mutex.Lock()
 	defer ck.mutex.Unlock()
+
+	// leader lose leader
+	if i == ck.leader{
+		ck.leader = -1
+	}
+
 	if ck.leader != -1{
 		return ck.leader
 	}else{

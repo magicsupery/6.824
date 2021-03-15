@@ -28,8 +28,9 @@ type Op struct {
 	Key   string
 	Value string
 	Command string // Get Put Append Notify
-	Id string
+	ClientId string
 	OpIndex int
+	OpId string
 }
 
 type OpResult struct{
@@ -49,201 +50,77 @@ type KVServer struct {
 
 	// Your definitions here.
 	closed       chan int
-	indexToWaitChannel map[int]interface{}
+	indexToWaitChannel sync.Map
 	keyToValue	 map[string]string
-	commitIndex int
 	clientToOpIndex map[string]int
-	clientOpIndexToLogIndex map[string]map[int]int
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	kv.mu.Lock()
-
-
 	DPrintf("server %s Get args %v", kv.who(), args)
-	if _, ok := kv.clientToOpIndex[args.ClientId]; !ok{
-		kv.clientToOpIndex[args.ClientId] = 0
-		kv.clientOpIndexToLogIndex[args.ClientId] = make(map[int]int)
+	op := Op{
+		Key: args.Key,
+		Command: "Get",
 	}
 
-	//dup ops
-	if args.OpIndex <= kv.clientToOpIndex[args.ClientId]{
-		//find the op binding logIndex in raft
-		logIndex := kv.clientOpIndexToLogIndex[args.ClientId][args.OpIndex]
-		//already success
-		if kv.commitIndex > logIndex{
-			reply.Value = kv.keyToValue[args.Key]
-			kv.mu.Unlock()
-			return
-		}else{
-			waitChan := make(chan OpResult)
-			kv.indexToWaitChannel[logIndex] = waitChan
-			kv.mu.Unlock()
+	message := raft.ServiceMessage{"op", op}
+	index, _, isLeader:= kv.rf.Start(message)
+	if !isLeader{
+		reply.Err = ErrWrongLeader
+		return
+	}else {
+		//wait for the command to commit
+		waitChan := make(chan OpResult)
+		kv.indexToWaitChannel.Store(index, waitChan)
 
-			result := <- waitChan
-			if result.Ret{
-				reply.Value = result.Value
-			}else{
-				reply.Err = Err(result.Value)
-			}
-
-			kv.mu.Lock()
-			delete(kv.clientOpIndexToLogIndex[args.ClientId], args.OpIndex)
-			kv.mu.Unlock()
-			return
-		}
-	}else{
-
-		op := Op{
-			Key: args.Key,
-			Command: "Get",
+		DPrintf("server %s store chan %v to index %d ", kv.who(), waitChan, index)
+		result := <- waitChan
+		kv.indexToWaitChannel.Delete(index)
+		DPrintf("server %s got get result %v from index %d", kv.who(), result, index)
+		if result.Ret {
+			reply.Value = result.Value
+		} else {
+			reply.Err = Err(result.Value)
 		}
 
-		message := raft.ServiceMessage{"op", op}
-		index, _, isLeader:= kv.rf.Start(message)
-		if !isLeader{
-			reply.Err = ErrWrongLeader
-			kv.mu.Unlock()
-			return
-		}else{
-			//wait for the command to commit
-			waitChan := make(chan OpResult)
-			kv.indexToWaitChannel[index] =  waitChan
-			kv.clientOpIndexToLogIndex[args.ClientId][args.OpIndex] = index
-			kv.mu.Unlock()
-
-			result := <- waitChan
-			if result.Ret{
-				reply.Value = result.Value
-			}else{
-				reply.Err = Err(result.Value)
-			}
-
-			kv.mu.Lock()
-			delete(kv.clientOpIndexToLogIndex[args.ClientId], args.OpIndex)
-			kv.mu.Unlock()
-			return
-		}
+		return
 	}
-
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	kv.mu.Lock()
 
 	DPrintf("server %s putappend args %v", kv.who(), args)
 
-	if _, ok := kv.clientToOpIndex[args.ClientId]; !ok{
-		kv.clientToOpIndex[args.ClientId] = 0
-		kv.clientOpIndexToLogIndex[args.ClientId] = make(map[int]int)
+	op := Op{
+		Key: args.Key,
+		Value: args.Value,
+		Command: args.Op,
+		ClientId: args.ClientId,
+		OpIndex: args.OpIndex,
 	}
 
-	//dup ops
-	if args.OpIndex <= kv.clientToOpIndex[args.ClientId]{
-		DPrintf("can not happend")
-		//find the op binding logIndex in raft
-		logIndex := kv.clientOpIndexToLogIndex[args.ClientId][args.OpIndex]
-		//already success
-		if kv.commitIndex > logIndex{
-			kv.mu.Unlock()
-			return
-		}else{
-			waitChan := make(chan OpResult)
-			kv.indexToWaitChannel[logIndex] = waitChan
-			kv.mu.Unlock()
+	message := raft.ServiceMessage{"op", op}
 
-			result := <- waitChan
-			DPrintf("server %s putappend args %v got result %v", kv.who(), args, result)
-			if !result.Ret{
-				reply.Err = Err(result.Value)
-			}
-
-			kv.mu.Lock()
-			delete(kv.clientOpIndexToLogIndex[args.ClientId], args.OpIndex)
-			kv.mu.Unlock()
-			return
-		}
+	index, _, isLeader:= kv.rf.Start(message)
+	if !isLeader{
+		reply.Err = ErrWrongLeader
+		return
 	}else{
-
-		op := Op{
-			Key: args.Key,
-			Value: args.Value,
-			Command: args.Op,
-			Id: args.Id,
+		//wait for the command to commit
+		waitChan := make(chan OpResult)
+		kv.indexToWaitChannel.Store(index, waitChan)
+		DPrintf("server %s store chan %v to index %d ", kv.who(), waitChan, index)
+		result := <- waitChan
+		kv.indexToWaitChannel.Delete(index)
+		DPrintf("server %s got putappend result %v from index %d", kv.who(), result, index)
+		if !result.Ret{
+			reply.Err = Err(result.Value)
 		}
 
-		message := raft.ServiceMessage{"op", op}
-
-		index, _, isLeader:= kv.rf.Start(message)
-		if !isLeader{
-			reply.Err = ErrWrongLeader
-			kv.mu.Unlock()
-			return
-		}else{
-			//wait for the command to commit
-			waitChan := make(chan OpResult)
-			kv.indexToWaitChannel[index] =  waitChan
-			kv.clientOpIndexToLogIndex[args.ClientId][args.OpIndex] = index
-
-			DPrintf("server %s putappend args %v wait for chan %p", kv.who(), args, &waitChan)
-			kv.mu.Unlock()
-
-			result := <- waitChan
-
-			DPrintf("server %s putappend args %v got result %v", kv.who(), args, result)
-			if !result.Ret{
-				reply.Err = Err(result.Value)
-			}
-
-			kv.mu.Lock()
-			delete(kv.clientOpIndexToLogIndex[args.ClientId], args.OpIndex)
-			kv.mu.Unlock()
-			return
-		}
+		return
 	}
-
-	// check if retry already in leader's log
-	//if args.PrevIndex != 0{
-	//	ret, command := kv.rf.GetLog(args.PrevIndex)
-	//	if !ret{
-	//		kv.doPutAppend(args, reply)
-	//	}else{
-	//		serviceMessage := command.(raft.ServiceMessage)
-	//		if serviceMessage.MessageType == "op"{
-	//			op := serviceMessage.Obj.(Op)
-	//			if op.Id == args.Id{
-	//				//dup operation find
-	//				kv.mu.Lock()
-	//
-	//				if args.PrevIndex <= kv.commitIndex{
-	//					kv.mu.Unlock()
-	//					return
-	//				}else{
-	//					waitChan := make(chan OpResult)
-	//					DPrintf("server %s store waitchan with index %d", kv.who(), args.PrevIndex)
-	//					kv.indexToWaitChannel.Store(args.PrevIndex, waitChan)
-	//					kv.mu.Unlock()
-	//
-	//					result := <- waitChan
-	//					if !result.Ret{
-	//						reply.Err = Err(result.Value)
-	//					}
-	//
-	//					return
-	//				}
-	//			}else{
-	//				kv.doPutAppend(args, reply)
-	//			}
-	//		}else{
-	//			kv.doPutAppend(args, reply)
-	//		}
-	//	}
-	//}else{
-	//	kv.doPutAppend(args, reply)
-	//}
 
 }
 
@@ -280,47 +157,67 @@ func (kv *KVServer) watchCommit() {
 					index := command.CommandIndex
 					op := message.Obj.(Op)
 
-					kv.mu.Lock()
-					kv.commitIndex = index
-					if waitChan, ok := kv.indexToWaitChannel[index]; ok{
-						DPrintf("server %s got command %v to channel %p", kv.who(), command, &waitChan)
-						if op.Command == "Get"{
-							if val, ok := kv.keyToValue[op.Key]; ok{
-								kv.mu.Unlock()
+					waitChan, hasChan:= kv.indexToWaitChannel.Load(index)
+
+					if op.Command == "Get"{
+						if val, ok := kv.keyToValue[op.Key]; ok{
+							if hasChan {
 								waitChan.(chan OpResult) <- OpResult{true, val}
-							}else{
-								kv.mu.Unlock()
+							}
+						}else{
+							if hasChan {
 								waitChan.(chan OpResult) <- OpResult{true, ""}
 							}
-						}else if op.Command == "Put"{
+						}
+					}else if op.Command == "Put"{
+						clientId := op.ClientId
+						if _, ok := kv.clientToOpIndex[clientId]; !ok{
+							kv.clientToOpIndex[clientId] = 0
+						}
+
+						if kv.clientToOpIndex[clientId] < op.OpIndex{
+							kv.clientToOpIndex[clientId] = op.OpIndex
 							kv.keyToValue[op.Key] = op.Value
-							kv.mu.Unlock()
+						}
+
+						if hasChan {
 							waitChan.(chan OpResult) <- OpResult{true, ""}
-						}else if op.Command == "Append"{
+						}
+					}else if op.Command == "Append"{
+						clientId := op.ClientId
+						if _, ok := kv.clientToOpIndex[clientId]; !ok{
+							kv.clientToOpIndex[clientId] = 0
+						}
+
+						if kv.clientToOpIndex[clientId] < op.OpIndex{
+							kv.clientToOpIndex[clientId] = op.OpIndex
 							if val, ok := kv.keyToValue[op.Key]; ok{
 								kv.keyToValue[op.Key] = val + op.Value
 							}else{
 								kv.keyToValue[op.Key] = op.Value
 							}
+						}
 
-							kv.mu.Unlock()
+						if hasChan {
 							waitChan.(chan OpResult) <- OpResult{true, ""}
 						}
-					}else{
-						kv.mu.Unlock()
 					}
+
 				}else if message.MessageType == "leaderChange"{
 					leaderChange := message.Obj.(raft.LeaderChange)
 					from := leaderChange.CommitIndex + 1
+
+					DPrintf("server %s got leader change %v, from %d, logindex %d",
+						kv.who(), leaderChange, from, leaderChange.LogIndex)
 					for from <= leaderChange.LogIndex{
-						kv.mu.Lock()
-						if waitChan, ok := kv.indexToWaitChannel[int(from)]; ok{
+						if waitChan, ok := kv.indexToWaitChannel.Load(from); ok{
+							DPrintf("server %s send change to chan %v", kv.who(), waitChan)
 							waitChan.(chan OpResult) <- OpResult{false, ErrLeaderChanged}
+						}else{
+							DPrintf("server %s send change to non chan %d", kv.who(), from)
 						}
 						from += 1
-						kv.mu.Unlock()
 					}
-
 				}
 
 			case <- kv.closed:
@@ -367,9 +264,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.closed = make(chan int)
 	kv.keyToValue = make(map[string]string)
-	kv.indexToWaitChannel = make(map[int]interface {})
 	kv.clientToOpIndex = make(map[string]int)
-	kv.clientOpIndexToLogIndex = make(map[string]map[int]int)
 	kv.watchCommit()
 
 	return kv

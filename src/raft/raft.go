@@ -74,8 +74,8 @@ type ServiceMessage struct{
 }
 
 type LeaderChange struct {
-	CommitIndex uint64
-	LogIndex uint64
+	CommitIndex int
+	LogIndex int
 }
 //
 // A Go object implementing a single Raft peer.
@@ -545,7 +545,7 @@ func (rf *Raft) changeToFollower(){
 		rf.applyCh <- ApplyMsg{
 			true,
 			ServiceMessage{"leaderChange",
-				LeaderChange{rf.commitIndex, rf.getLastLogIndex()}},
+				LeaderChange{int(rf.commitIndex), int(rf.getLastLogIndex())}},
 			int(rf.commitIndex),
 		}
 	}
