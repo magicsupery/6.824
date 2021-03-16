@@ -11,7 +11,7 @@ import (
 	_ "github.com/google/uuid"
 )
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -76,7 +76,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 		DPrintf("server %s store chan %v to index %d ", kv.who(), waitChan, index)
 		result := <- waitChan
-		kv.indexToWaitChannel.Delete(index)
 		DPrintf("server %s got get result %v from index %d", kv.who(), result, index)
 		if result.Ret {
 			reply.Value = result.Value
@@ -103,6 +102,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	message := raft.ServiceMessage{"op", op}
 
+	//TODO 这里有一个实现问题，其实应该用opid把waitchan先放进去
+	//否则可能raft的applychan上来，这里的waitchan还没有放到map里（极端情况，因为发生在不同协程）
 	index, _, isLeader:= kv.rf.Start(message)
 	if !isLeader{
 		reply.Err = ErrWrongLeader
@@ -113,7 +114,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.indexToWaitChannel.Store(index, waitChan)
 		DPrintf("server %s store chan %v to index %d ", kv.who(), waitChan, index)
 		result := <- waitChan
-		kv.indexToWaitChannel.Delete(index)
 		DPrintf("server %s got putappend result %v from index %d", kv.who(), result, index)
 		if !result.Ret{
 			reply.Err = Err(result.Value)
@@ -212,6 +212,8 @@ func (kv *KVServer) watchCommit() {
 					for from <= leaderChange.LogIndex{
 						if waitChan, ok := kv.indexToWaitChannel.Load(from); ok{
 							DPrintf("server %s send change to chan %v", kv.who(), waitChan)
+							// need delete the old chan
+							kv.indexToWaitChannel.Delete(from)
 							waitChan.(chan OpResult) <- OpResult{false, ErrLeaderChanged}
 						}else{
 							DPrintf("server %s send change to non chan %d", kv.who(), from)
