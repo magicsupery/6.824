@@ -816,7 +816,9 @@ func (rf *Raft) realSendAppendEntries(peer *labrpc.ClientEnd, index int, term ui
 						}
 					}
 				}else{
-					rf.nextIndex[index] -= 1
+					if rf.nextIndex[index] > 1{
+						rf.nextIndex[index] -= 1
+					}
 				}
 				DPrintf("raft %s adjust peer %d next index to %d, from reply %v",
 					rf.who(), index, rf.nextIndex[index], reply)
