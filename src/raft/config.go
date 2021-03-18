@@ -190,6 +190,8 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 		if m.SnapshotValid {
 			if cfg.rafts[i].CondInstallSnapshot(m.SnapshotTerm,
 				m.SnapshotIndex, m.Snapshot) {
+
+				cfg.mu.Lock()
 				cfg.logs[i] = make(map[int]interface{})
 				r := bytes.NewBuffer(m.Snapshot)
 				d := labgob.NewDecoder(r)
@@ -198,6 +200,8 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 					log.Fatalf("decode error\n")
 				}
 				cfg.logs[i][m.SnapshotIndex] = v
+
+				cfg.mu.Unlock()
 			}
 		} else if m.CommandValid {
 			cfg.mu.Lock()
