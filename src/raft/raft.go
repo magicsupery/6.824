@@ -195,23 +195,36 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	go func(){
+		DPrintf("raft %d enter snapshot 0", rf.me)
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
 
-	if index > int(rf.commitIndex){
-		DPrintf("raft %s got an invalid snapshot index %d, commit index is %d",
-			rf.who(), index, rf.commitIndex)
-		return
-	}
+		DPrintf("raft %d enter snapshot 1", rf.me)
+		if index > int(rf.commitIndex){
+			DPrintf("raft %s got an invalid snapshot index %d, commit index is %d",
+				rf.who(), index, rf.commitIndex)
+			return
+		}
 
-	logIndex := index - int(rf.lastSnapshotIndex)
+		if index <= int(rf.lastSnapshotIndex){
+			DPrintf("raft %s got an invalid snapshot index %d, last snapshot index is %d",
+				rf.who(), index, rf.lastSnapshotIndex)
+			return
+		}
 
-	rf.lastSnapshotTerm = rf.Logs[logIndex - 1].Term
-	rf.lastSnapshotIndex = uint64(index)
-	rf.snapshot = snapshot
-	rf.Logs = rf.Logs[logIndex:]
+		logIndex := index - int(rf.lastSnapshotIndex)
 
-	rf.persist()
+		rf.lastSnapshotTerm = rf.Logs[logIndex - 1].Term
+		rf.lastSnapshotIndex = uint64(index)
+		rf.snapshot = snapshot
+		rf.Logs = rf.Logs[logIndex:]
+
+		DPrintf("raft %d enter snapshot 2", rf.me)
+		rf.persist()
+
+		DPrintf("raft %d enter snapshot 3", rf.me)
+	}()
 }
 
 
@@ -714,6 +727,7 @@ func(rf *Raft) sendSingleAppendEntries(peer *labrpc.ClientEnd, index int, isHear
 		prevLogIndex = rf.getPrevLogIndex(nextIndex)
 		if prevLogIndex < rf.lastSnapshotIndex{
 			//install snapshot
+			DPrintf("raft %s need install snapshot to other", rf.who())
 		}else{
 			prevLogTerm = rf.getLogTermAtIndex(prevLogIndex)
 			log = make([]Log, lastLogIndex - nextIndex + 1)
@@ -857,6 +871,14 @@ func (rf *Raft) getLogTermAtIndex(index uint64) uint64{
 	}
 }
 
+func (rf *Raft) getLogAtIndex(index uint64) Log{
+	if index <= rf.lastSnapshotIndex{
+		return Log{}
+	}else{
+		return rf.Logs[index - rf.lastSnapshotIndex - 1]
+	}
+}
+
 func (rf *Raft) getLastLogIndex() uint64{
 	return uint64(len(rf.Logs)) + rf.lastSnapshotIndex
 }
@@ -889,7 +911,8 @@ func (rf *Raft) commitLogs(to uint64) {
 		//add index
 		index := from + 1
 		for index <= to{
-			command := rf.Logs[index - 1].Command
+			log := rf.getLogAtIndex(index)
+			command := log.Command
 			//go func(index uint64, command interface{}){
 				applyMsg = ApplyMsg{
 					true,
