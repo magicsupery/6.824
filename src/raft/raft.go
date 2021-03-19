@@ -83,7 +83,7 @@ type LeaderChange struct {
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
+	Persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
@@ -100,7 +100,7 @@ type Raft struct {
 	commitIndex       uint64
 	lastApplied       uint64
 	lastSnapshotIndex uint64
-	lastSnapshotTerm uint64
+	lastSnapshotTerm  uint64
 
 	nextIndex     map[int]uint64
 	matchIndex    map[int]uint64
@@ -115,7 +115,8 @@ type Raft struct {
 	applyCh          chan ApplyMsg
 	snapshot         []byte
 
-	waitIdToChan   sync.Map
+	waitIdToChan sync.Map
+	closed       chan interface{}
 }
 
 // return CurrentTerm and whether this server
@@ -146,13 +147,17 @@ func (rf *Raft) persist() {
 	e.Encode(rf.Logs)
 	data := w.Bytes()
 
-	snapshot := new(bytes.Buffer)
-	ssEncode := labgob.NewEncoder(snapshot)
-	ssEncode.Encode(rf.snapshot)
-	ssEncode.Encode(rf.lastSnapshotIndex)
-	ssEncode.Encode(rf.lastSnapshotTerm)
+	if rf.lastSnapshotIndex != 0{
+		snapshot := new(bytes.Buffer)
+		ssEncode := labgob.NewEncoder(snapshot)
+		ssEncode.Encode(rf.snapshot)
+		ssEncode.Encode(rf.lastSnapshotIndex)
+		ssEncode.Encode(rf.lastSnapshotTerm)
+		rf.Persister.SaveStateAndSnapshot(data, snapshot.Bytes())
+	}else{
+		rf.Persister.SaveRaftState(data)
+	}
 
-	rf.persister.SaveStateAndSnapshot(data, snapshot.Bytes())
 }
 
 
@@ -192,6 +197,7 @@ func (rf *Raft) readPersist(data []byte, snapshotData []byte) {
 		rf.lastSnapshotIndex = lastSnapshotIndex
 		rf.lastSnapshotTerm = lastSnapshotTerm
 		rf.snapshot = snapshot
+		rf.commitIndex = rf.lastSnapshotIndex
 	}
 }
 
@@ -445,9 +451,12 @@ type InstallSnapshotReply struct {
 
 func (rf *Raft)InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnapshotReply){
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	DPrintf("raft %s got snapshot args %v", rf.who(), args)
+
+	needApply := false
+	var applyMsg ApplyMsg
+
 	if args.Term < rf.CurrentTerm{
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
@@ -482,18 +491,20 @@ func (rf *Raft)InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnaps
 			reply.Term = rf.CurrentTerm
 			reply.Success = true
 
-			go func(){
-				applyMsg := ApplyMsg{
-					SnapshotValid:true,
-					Snapshot:rf.snapshot,
-					SnapshotTerm: int(rf.lastSnapshotTerm),
-					SnapshotIndex: int(rf.lastSnapshotIndex),
+			needApply = true
+			applyMsg = ApplyMsg{
+				SnapshotValid:true,
+				Snapshot:rf.snapshot,
+				SnapshotTerm: int(rf.lastSnapshotTerm),
+				SnapshotIndex: int(rf.lastSnapshotIndex),
+			}
 
-				}
-
-				rf.applyCh <- applyMsg
-			}()
 		}
+	}
+
+	rf.mu.Unlock()
+	if needApply{
+		rf.applyCh <- applyMsg
 	}
 }
 
@@ -591,9 +602,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.cancelFunc()
+	close(rf.closed)
 }
 
 func (rf *Raft) killed() bool {
@@ -636,7 +645,7 @@ func (rf *Raft) followerElectionTimeout(ctx context.Context) {
 
 		case <- ctx.Done():
 			//_, _ = DPrintf("follower election time done")
-
+		case <- rf.closed:
 	}
 
 }
@@ -649,6 +658,7 @@ func (rf *Raft) candidateElectionTimeout(ctx context.Context){
 			rf.changeToCandidate()
 		case <- ctx.Done():
 			//_, _ = DPrintf("candidate election time done")
+		case <- rf.closed:
 	}
 }
 
@@ -670,6 +680,7 @@ func (rf *Raft) leaderElectionTimeout(ctx context.Context) {
 		go func(ctx context.Context){rf.leaderElectionTimeout(ctx)}(rf.electionContext)
 	case <- ctx.Done():
 		//_, _ = DPrintf("leader election time done")
+	case <- rf.closed:
 	}
 }
 
@@ -814,7 +825,7 @@ func(rf *Raft) sendSingleAppendEntries(peer *labrpc.ClientEnd, index int, isHear
 		prevLogIndex = rf.getPrevLogIndex(nextIndex)
 		if prevLogIndex < rf.lastSnapshotIndex{
 			//install snapshot
-			DPrintf("raft %s need install snapshot to peer %d ", rf.who(), index)
+			DPrintf("raft %s need install snapshot to peer %d pervLogIndex %d", rf.who(), index, prevLogIndex)
 
 			go func(myPeer *labrpc.ClientEnd, index int, term uint64,
 					lastSnapshotIndex uint64, lastSnapshotTerm uint64, snapshot []byte){
@@ -916,6 +927,10 @@ func (rf *Raft) realSendAppendEntries(peer *labrpc.ClientEnd, index int, term ui
 			}
 			rf.sendSingleAppendEntries(peer, index, false)
 		}
+	}else{
+		if atomic.LoadInt32(&rf.dead) != 1{
+			rf.sendSingleAppendEntries(peer, index, false)
+		}
 	}
 }
 
@@ -957,8 +972,6 @@ func (rf *Raft) realSendInstallSnapshot(peer *labrpc.ClientEnd,
 		}else{
 			rf.sendSingleAppendEntries(peer, index, false)
 		}
-	}else{
-		rf.sendSingleAppendEntries(peer, index, false)
 	}
 }
 
@@ -1121,7 +1134,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
-	rf.persister = persister
+	rf.Persister = persister
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
@@ -1138,6 +1151,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make(map[int]uint64)
 	rf.idToAppending = make(map[int]bool)
 
+	rf.closed = make(chan interface{})
 	rf.electionContext, rf.cancelFunc = context.WithCancel(context.Background())
 
 	// initialize from state persisted before a crash
