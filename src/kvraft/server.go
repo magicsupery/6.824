@@ -4,14 +4,15 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
+	"bytes"
 	"fmt"
+	_ "github.com/google/uuid"
 	"log"
 	"sync"
 	"sync/atomic"
-	_ "github.com/google/uuid"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -49,10 +50,11 @@ type KVServer struct {
 	// snapshot if log grows this big
 
 	// Your definitions here.
-	closed       chan int
+	closed             chan int
 	indexToWaitChannel sync.Map
-	keyToValue	 map[string]string
-	clientToOpIndex map[string]int
+	KeyToValue         map[string]string
+	ClientToOpIndex    map[string]int
+	CommitIndex        int
 }
 
 
@@ -152,73 +154,94 @@ func (kv *KVServer) watchCommit() {
 			select{
 			case command := <- kv.applyCh:
 				DPrintf("server %s got command %v ", kv.who(), command)
-				message := command.Command.(raft.ServiceMessage)
-				if message.MessageType == "op"{
-					index := command.CommandIndex
-					op := message.Obj.(Op)
+				if command.SnapshotValid{
+					if kv.rf.CondInstallSnapshot(command.SnapshotTerm, command.SnapshotIndex, command.Snapshot){
+						kv.readSnapshot(command.Snapshot)
+						kv.CommitIndex = command.SnapshotIndex
+						DPrintf("server %s set commit index to snapshot index %d", kv.who(), kv.CommitIndex)
+					}
+				}else{
+					message := command.Command.(raft.ServiceMessage)
+					if message.MessageType == "op"{
+						index := command.CommandIndex
+						if index != kv.CommitIndex + 1{
+							panic(fmt.Sprintf("server %s got index %d , but current commit index is %d",
+							kv.who(), index, kv.CommitIndex))
+						}
 
-					waitChan, hasChan:= kv.indexToWaitChannel.Load(index)
+						kv.CommitIndex = index
+						op := message.Obj.(Op)
 
-					if op.Command == "Get"{
-						if val, ok := kv.keyToValue[op.Key]; ok{
-							if hasChan {
-								waitChan.(chan OpResult) <- OpResult{true, val}
+						waitChan, hasChan:= kv.indexToWaitChannel.Load(index)
+
+						if op.Command == "Get"{
+							if val, ok := kv.KeyToValue[op.Key]; ok{
+								if hasChan {
+									waitChan.(chan OpResult) <- OpResult{true, val}
+								}
+							}else{
+								if hasChan {
+									waitChan.(chan OpResult) <- OpResult{true, ""}
+								}
 							}
-						}else{
+						}else if op.Command == "Put"{
+							clientId := op.ClientId
+							if _, ok := kv.ClientToOpIndex[clientId]; !ok{
+								kv.ClientToOpIndex[clientId] = 0
+							}
+
+							if kv.ClientToOpIndex[clientId] < op.OpIndex{
+								kv.ClientToOpIndex[clientId] = op.OpIndex
+								kv.KeyToValue[op.Key] = op.Value
+							}
+
+							DPrintf("server %s put [%s] = %s", kv.who(), op.Key, op.Value)
+							if hasChan {
+								waitChan.(chan OpResult) <- OpResult{true, ""}
+							}
+						}else if op.Command == "Append"{
+
+							clientId := op.ClientId
+							if _, ok := kv.ClientToOpIndex[clientId]; !ok{
+								kv.ClientToOpIndex[clientId] = 0
+							}
+
+							if kv.ClientToOpIndex[clientId] < op.OpIndex{
+								kv.ClientToOpIndex[clientId] = op.OpIndex
+								if val, ok := kv.KeyToValue[op.Key]; ok{
+									kv.KeyToValue[op.Key] = val + op.Value
+								}else{
+									kv.KeyToValue[op.Key] = op.Value
+								}
+							}
+
+							DPrintf("server %s append [%s] = %s", kv.who(), op.Key, kv.KeyToValue[op.Key])
 							if hasChan {
 								waitChan.(chan OpResult) <- OpResult{true, ""}
 							}
 						}
-					}else if op.Command == "Put"{
-						clientId := op.ClientId
-						if _, ok := kv.clientToOpIndex[clientId]; !ok{
-							kv.clientToOpIndex[clientId] = 0
+
+						if kv.maxraftstate != -1 && kv.rf.Persister.RaftStateSize() > kv.maxraftstate{
+							kv.rf.Snapshot(index, kv.persist())
 						}
 
-						if kv.clientToOpIndex[clientId] < op.OpIndex{
-							kv.clientToOpIndex[clientId] = op.OpIndex
-							kv.keyToValue[op.Key] = op.Value
-						}
+					}else if message.MessageType == "leaderChange"{
+						leaderChange := message.Obj.(raft.LeaderChange)
+						from := leaderChange.CommitIndex + 1
 
-						if hasChan {
-							waitChan.(chan OpResult) <- OpResult{true, ""}
-						}
-					}else if op.Command == "Append"{
-						clientId := op.ClientId
-						if _, ok := kv.clientToOpIndex[clientId]; !ok{
-							kv.clientToOpIndex[clientId] = 0
-						}
-
-						if kv.clientToOpIndex[clientId] < op.OpIndex{
-							kv.clientToOpIndex[clientId] = op.OpIndex
-							if val, ok := kv.keyToValue[op.Key]; ok{
-								kv.keyToValue[op.Key] = val + op.Value
+						DPrintf("server %s got leader change %v, from %d, logindex %d",
+							kv.who(), leaderChange, from, leaderChange.LogIndex)
+						for from <= leaderChange.LogIndex{
+							if waitChan, ok := kv.indexToWaitChannel.Load(from); ok{
+								DPrintf("server %s send change to chan %v", kv.who(), waitChan)
+								// need delete the old chan
+								kv.indexToWaitChannel.Delete(from)
+								waitChan.(chan OpResult) <- OpResult{false, ErrLeaderChanged}
 							}else{
-								kv.keyToValue[op.Key] = op.Value
+								DPrintf("server %s send change to non chan %d", kv.who(), from)
 							}
+							from += 1
 						}
-
-						if hasChan {
-							waitChan.(chan OpResult) <- OpResult{true, ""}
-						}
-					}
-
-				}else if message.MessageType == "leaderChange"{
-					leaderChange := message.Obj.(raft.LeaderChange)
-					from := leaderChange.CommitIndex + 1
-
-					DPrintf("server %s got leader change %v, from %d, logindex %d",
-						kv.who(), leaderChange, from, leaderChange.LogIndex)
-					for from <= leaderChange.LogIndex{
-						if waitChan, ok := kv.indexToWaitChannel.Load(from); ok{
-							DPrintf("server %s send change to chan %v", kv.who(), waitChan)
-							// need delete the old chan
-							kv.indexToWaitChannel.Delete(from)
-							waitChan.(chan OpResult) <- OpResult{false, ErrLeaderChanged}
-						}else{
-							DPrintf("server %s send change to non chan %d", kv.who(), from)
-						}
-						from += 1
 					}
 				}
 
@@ -233,6 +256,57 @@ func (kv *KVServer) watchCommit() {
 func (kv *KVServer) who() string {
 	return fmt.Sprintf("(%d)", kv.me)
 }
+
+func (kv *KVServer) readPersist(snapshot []byte) {
+	if snapshot == nil || len(snapshot) < 1 { // bootstrap without any state?
+		return
+	}
+	DPrintf("server %s got persist snapshot data size %d", kv.who(), len(snapshot))
+	r1 := bytes.NewBuffer(snapshot)
+	d1 := labgob.NewDecoder(r1)
+	var data[]byte
+	var lastSnapshotIndex uint64
+	var lastSnapshotTerm uint64
+	if d1.Decode(&data) != nil ||
+		d1.Decode(&lastSnapshotIndex) != nil ||
+		d1.Decode(&lastSnapshotTerm) != nil{
+		panic(fmt.Sprintf("server %s read persist snapshot error", kv.who()))
+	}else{
+		if kv.readSnapshot(data){
+			kv.CommitIndex = int(lastSnapshotIndex)
+		}
+	}
+}
+
+func (kv *KVServer)readSnapshot(snapshot []byte) bool{
+	if snapshot == nil || len(snapshot) < 1 { // bootstrap without any state?
+		return true
+	}
+	DPrintf("server %s got snapshot data size %d", kv.who(), len(snapshot))
+
+	r2 := bytes.NewBuffer(snapshot)
+	d2 := labgob.NewDecoder(r2)
+	var keyToValue map[string]string
+	var clientToOpIndex map[string]int
+	if d2.Decode(&keyToValue) != nil ||
+		d2.Decode(&clientToOpIndex) != nil{
+		panic(fmt.Sprintf("server %s read snapshot error", kv.who()))
+	}else{
+		kv.KeyToValue = keyToValue
+		kv.ClientToOpIndex = clientToOpIndex
+		DPrintf("server %s restore commit index to %d, kv to %v", kv.who(), kv.CommitIndex, kv.KeyToValue)
+		return true
+	}
+}
+
+func (kv *KVServer) persist() []byte{
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.KeyToValue)
+	e.Encode(kv.ClientToOpIndex)
+	return w.Bytes()
+}
+
 
 //
 // servers[] contains the ports of the set of
@@ -258,16 +332,22 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
+	kv.CommitIndex = 0
+	kv.KeyToValue = make(map[string]string)
+	kv.ClientToOpIndex = make(map[string]int)
 	// You may need initialization code here.
 
+	if kv.maxraftstate != -1{
+		kv.readPersist(persister.ReadSnapshot())
+	}
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
 	kv.closed = make(chan int)
-	kv.keyToValue = make(map[string]string)
-	kv.clientToOpIndex = make(map[string]int)
+
 	kv.watchCommit()
 
+	DPrintf("create server %s success", kv.who())
 	return kv
 }

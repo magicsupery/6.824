@@ -318,6 +318,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 		if crash {
 			//log.Printf("shutdown servers\n")
 			for i := 0; i < nservers; i++ {
+				log.Printf("shutdown servers %d \n", i)
 				cfg.ShutdownServer(i)
 			}
 			// Wait for a while for servers to shutdown, since

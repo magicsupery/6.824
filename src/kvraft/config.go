@@ -1,6 +1,8 @@
 package kvraft
 
-import "6.824/labrpc"
+import (
+	"6.824/labrpc"
+)
 import "testing"
 import "os"
 
@@ -129,7 +131,7 @@ func (cfg *config) connect(i int, to []int) {
 // detach server i from the servers listed in from
 // caller must hold cfg.mu
 func (cfg *config) disconnectUnlocked(i int, from []int) {
-	// log.Printf("disconnect peer %d from %v\n", i, from)
+	//log.Printf("disconnect peer %d from %v\n", i, from)
 
 	// outgoing socket files
 	for j := 0; j < len(from); j++ {
@@ -254,6 +256,7 @@ func (cfg *config) DisconnectClient(ck *Clerk, from []int) {
 // Shutdown a server by isolating it
 func (cfg *config) ShutdownServer(i int) {
 	cfg.mu.Lock()
+
 	defer cfg.mu.Unlock()
 
 	cfg.disconnectUnlocked(i, cfg.All())
@@ -281,6 +284,7 @@ func (cfg *config) ShutdownServer(i int) {
 		cfg.mu.Lock()
 		cfg.kvservers[i] = nil
 	}
+
 }
 
 // If restart servers, first call ShutdownServer
