@@ -146,6 +146,8 @@ func (ck *Clerk) Put(key string, value string) {
 func (ck *Clerk) Append(key string, value string) {
 	DPrintf("send  append %s", key)
 	ck.PutAppend(key, value, "Append")
+
+	DPrintf("send  append %s end", key)
 }
 
 func (ck *Clerk) getSendIndex() int {

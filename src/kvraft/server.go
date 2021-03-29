@@ -55,12 +55,16 @@ type KVServer struct {
 	KeyToValue         map[string]string
 	ClientToOpIndex    map[string]int
 	CommitIndex        int
+
+	readNum	           int32
+	putNum             int32
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	DPrintf("server %s Get args %v", kv.who(), args)
+
 	op := Op{
 		Key: args.Key,
 		Command: "Get",
@@ -73,12 +77,18 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}else {
 		//wait for the command to commit
+
+		atomic.AddInt32(&kv.readNum, 1)
 		waitChan := make(chan OpResult)
 		kv.indexToWaitChannel.Store(index, waitChan)
 
 		DPrintf("server %s store chan %v to index %d ", kv.who(), waitChan, index)
 		result := <- waitChan
-		DPrintf("server %s got get result %v from index %d", kv.who(), result, index)
+
+		remain := atomic.AddInt32(&kv.readNum, -1)
+		DPrintf("server %s got get result %v from index %d , remain readNum is %d",
+			kv.who(), result, index, remain)
+
 		if result.Ret {
 			reply.Value = result.Value
 		} else {
@@ -112,11 +122,16 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}else{
 		//wait for the command to commit
+		atomic.AddInt32(&kv.putNum, 1)
 		waitChan := make(chan OpResult)
 		kv.indexToWaitChannel.Store(index, waitChan)
 		DPrintf("server %s store chan %v to index %d ", kv.who(), waitChan, index)
 		result := <- waitChan
-		DPrintf("server %s got putappend result %v from index %d", kv.who(), result, index)
+
+		remain := atomic.AddInt32(&kv.putNum, -1)
+		DPrintf("server %s got putappend result %v from index %d remain putNum is %d" ,
+			kv.who(), result, index, remain)
+
 		if !result.Ret{
 			reply.Err = Err(result.Value)
 		}
@@ -157,8 +172,22 @@ func (kv *KVServer) watchCommit() {
 				if command.SnapshotValid{
 					if kv.rf.CondInstallSnapshot(command.SnapshotTerm, command.SnapshotIndex, command.Snapshot){
 						kv.readSnapshot(command.Snapshot)
+						from := kv.CommitIndex
 						kv.CommitIndex = command.SnapshotIndex
-						DPrintf("server %s set commit index to snapshot index %d", kv.who(), kv.CommitIndex)
+						DPrintf("server %s set commit index to snapshot index %d from %d",
+							kv.who(), kv.CommitIndex, from)
+
+						//for from <= kv.CommitIndex{
+						//	if waitChan, ok := kv.indexToWaitChannel.Load(from); ok{
+						//		// DPrintf("server %s send change to chan %v", kv.who(), waitChan)
+						//		// need delete the old chan
+						//		kv.indexToWaitChannel.Delete(from)
+						//		waitChan.(chan OpResult) <- OpResult{false, ErrLeaderChanged}
+						//	}
+						//
+						//	from += 1
+						//}
+
 					}
 				}else{
 					message := command.Command.(raft.ServiceMessage)
@@ -247,7 +276,7 @@ func (kv *KVServer) watchCommit() {
 
 			case <- kv.closed:
 				DPrintf("server %s watchCommit closed", kv.who())
-				return
+
 			}
 		}
 	}()
@@ -348,6 +377,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.watchCommit()
 
+	kv.readNum = 0
+	kv.putNum = 0
 	DPrintf("create server %s success", kv.who())
 	return kv
 }
