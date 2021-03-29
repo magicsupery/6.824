@@ -209,14 +209,15 @@ func (rf *Raft) readPersist(data []byte, snapshotData []byte) {
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	if int(rf.lastSnapshotIndex) == lastIncludedIndex && int(rf.lastSnapshotTerm) == lastIncludedTerm{
-		return true
-	}
-
-	return false
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
+	//
+	//if int(rf.lastSnapshotIndex) == lastIncludedIndex && int(rf.lastSnapshotTerm) == lastIncludedTerm{
+	//	return true
+	//}
+	//
+	//return false
+	return true
 }
 
 // the service says it has created a snapshot that has
@@ -451,10 +452,10 @@ type InstallSnapshotReply struct {
 
 func (rf *Raft)InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnapshotReply){
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	DPrintf("raft %s got snapshot args %v", rf.who(), args)
 
-	needApply := false
 	var applyMsg ApplyMsg
 
 	if args.Term < rf.CurrentTerm{
@@ -477,9 +478,6 @@ func (rf *Raft)InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnaps
 			reply.Term = rf.CurrentTerm
 		}else{
 			//install new snapshot
-
-
-
 			rf.lastSnapshotIndex = args.LastIncludedIndex
 			rf.lastSnapshotTerm = args.LastIncludedTerm
 			rf.snapshot = args.Data
@@ -491,7 +489,6 @@ func (rf *Raft)InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnaps
 			reply.Term = rf.CurrentTerm
 			reply.Success = true
 
-			needApply = true
 			applyMsg = ApplyMsg{
 				SnapshotValid:true,
 				Snapshot:rf.snapshot,
@@ -499,12 +496,9 @@ func (rf *Raft)InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnaps
 				SnapshotIndex: int(rf.lastSnapshotIndex),
 			}
 
-		}
-	}
+			rf.applyCh <- applyMsg
 
-	rf.mu.Unlock()
-	if needApply{
-		rf.applyCh <- applyMsg
+		}
 	}
 }
 
@@ -810,6 +804,11 @@ func (rf *Raft) sendAllAppendEntries(isHeartbeat bool){
 }
 
 func(rf *Raft) sendSingleAppendEntries(peer *labrpc.ClientEnd, index int, isHeartbeat bool){
+	//only leader can send
+	if rf.currentState != leader{
+		return
+	}
+
 	if isHeartbeat && rf.idToAppending[index]{
 		return
 	}
@@ -1077,6 +1076,7 @@ func (rf *Raft) commitLogs(to uint64) {
 
 	rf.commitIndex = to
 
+	DPrintf("raft %s commitLogs to %d from %d end", rf.who(), to, from)
 }
 
 func (rf *Raft) setLogAtIndex(index uint64, log Log) {
