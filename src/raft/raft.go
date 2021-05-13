@@ -117,6 +117,12 @@ type Raft struct {
 
 	waitIdToChan sync.Map
 	closed       chan interface{}
+
+	id int
+}
+
+func (rf *Raft)SetID(id int){
+	rf.id = id
 }
 
 // return CurrentTerm and whether this server
@@ -980,8 +986,8 @@ func (rf *Raft) who() string {
 		printLogs = printLogs[len(printLogs) - 10:]
 	}
 
-	return fmt.Sprintf("(%d, %d, Logs(%v) %v, commitIndex %v snapshot(%v %v) ",
-		rf.me, rf.CurrentTerm, len(rf.Logs), printLogs, rf.commitIndex,
+	return fmt.Sprintf("(%d, %d, %d, Logs(%v) %v, commitIndex %v snapshot(%v %v) ",
+		rf.id, rf.me, rf.CurrentTerm, len(rf.Logs), printLogs, rf.commitIndex,
 		rf.lastSnapshotIndex, rf.lastSnapshotTerm)
 }
 
