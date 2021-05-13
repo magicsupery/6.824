@@ -8,7 +8,10 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "6.824/labrpc"
+import (
+	"6.824/labrpc"
+	"github.com/google/uuid"
+)
 import "crypto/rand"
 import "math/big"
 import "6.824/shardctrler"
@@ -40,6 +43,8 @@ type Clerk struct {
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	opIndex int
+	id string
 }
 
 //
@@ -56,6 +61,9 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
+
+	ck.id = uuid.New().String()
+	ck.opIndex = 1
 	return ck
 }
 
@@ -104,7 +112,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
+	args.ClientId = ck.id
+	args.OpIndex = ck.opIndex
 
+	ck.opIndex += 1
 
 	for {
 		shard := key2shard(key)
