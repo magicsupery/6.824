@@ -4,7 +4,10 @@ package shardctrler
 // Shardctrler clerk.
 //
 
-import "6.824/labrpc"
+import (
+	"6.824/labrpc"
+	"github.com/google/uuid"
+)
 import "time"
 import "crypto/rand"
 import "math/big"
@@ -12,6 +15,8 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	id string
+	opIndex int
 }
 
 func nrand() int64 {
@@ -25,6 +30,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.id = uuid.New().String()
+	ck.opIndex = 1
 	return ck
 }
 
@@ -49,7 +56,9 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	args := &JoinArgs{}
 	// Your code here.
 	args.Servers = servers
-
+	args.ClientId = ck.id
+	args.OpIndex = ck.opIndex
+	ck.opIndex += 1
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -67,6 +76,9 @@ func (ck *Clerk) Leave(gids []int) {
 	args := &LeaveArgs{}
 	// Your code here.
 	args.GIDs = gids
+	args.ClientId = ck.id
+	args.OpIndex = ck.opIndex
+	ck.opIndex += 1
 
 	for {
 		// try each known server.
@@ -86,6 +98,9 @@ func (ck *Clerk) Move(shard int, gid int) {
 	// Your code here.
 	args.Shard = shard
 	args.GID = gid
+	args.ClientId = ck.id
+	args.OpIndex = ck.opIndex
+	ck.opIndex += 1
 
 	for {
 		// try each known server.
