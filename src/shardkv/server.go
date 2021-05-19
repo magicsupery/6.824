@@ -80,7 +80,7 @@ type ShardKV struct {
 
 	closed              chan int
 	indexToWaitChannel  sync.Map
-	ShardToKVMap        map[int]KVMap
+	ShardToKVMap        map[int]*KVMap
 	ClientToOpIndex     map[string]int
 	CommitIndex         int
 	Config              shardctrler.Config
@@ -265,11 +265,13 @@ func (kv *ShardKV) watchCommit() {
 								if val, ok := retMap[op.Key];ok{
 									value = val
 								}
+
+								DPrintf("server %s get [%s] = %s", kv.who(), op.Key, value)
 							}else{
 								ret = false
 								value = ErrWrongGroup
 							}
-
+							//DPrintf("server %s debug for map %v", kv.who(), kv.ShardToKVMap)
 							if hasChan {
 								waitChan.(chan OpResult) <- OpResult{ret, value}
 							}
@@ -342,15 +344,17 @@ func (kv *ShardKV) watchCommit() {
 											Src: kv.gid,
 											Dst: gid,
 											ConfigNum: config.Num,
-											KV: deepcopy.Copy(kvmap).(KVMap),
+											KV: *(deepcopy.Copy(kvmap).(*KVMap)),
 										}
+
+										//DPrintf("server %s debug for map %v", kv.who(), kv.ShardToKVMap)
 									}
 								}else{
 									if gid == kv.gid{
 										//old not have, new have
 										if config.Num == 1{
 											//create
-											kv.ShardToKVMap[shard] = KVMap{
+											kv.ShardToKVMap[shard] = &KVMap{
 												Res : make(map[string]string),
 												Status : STABLE,
 											}
@@ -370,7 +374,6 @@ func (kv *ShardKV) watchCommit() {
 									}
 								}
 							}
-
 							kv.Config = config
 
 							if len(kv.shardToTransferInfo) == 0{
@@ -419,7 +422,8 @@ func (kv *ShardKV) watchCommit() {
 										DPrintf("server %s delete transfer shard %d", kv.who(), shardTransfer.Shard)
 									}else if shardTransfer.Dst == kv.gid{
 										shardTransfer.KV.Status = STABLE
-										kv.ShardToKVMap[shardTransfer.Shard] = deepcopy.Copy(shardTransfer.KV).(KVMap)
+										kvmap := deepcopy.Copy(shardTransfer.KV).(KVMap)
+										kv.ShardToKVMap[shardTransfer.Shard] = &kvmap
 										DPrintf("server %s create transfer shard %d", kv.who(), shardTransfer.Shard)
 									}
 									if len(kv.shardToTransferInfo) == 0{
@@ -677,7 +681,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	// Your initialization code here.
 	kv.CommitIndex = 0
-	kv.ShardToKVMap = make(map[int]KVMap)
+	kv.ShardToKVMap = make(map[int]*KVMap)
 	kv.ClientToOpIndex = make(map[string]int)
 	kv.Config = shardctrler.Config{
 		Num : 0,
