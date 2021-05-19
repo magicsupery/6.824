@@ -4,8 +4,8 @@ import (
 	"6.824/labrpc"
 	"6.824/shardctrler"
 	"fmt"
+	"github.com/mohae/deepcopy"
 	"log"
-	"strconv"
 	"sync/atomic"
 	"time"
 )
@@ -90,6 +90,7 @@ type ShardKV struct {
 	gidToReadyNum       map[int]int
 	readyChan           chan QueryMsg
 	queryConfig         shardctrler.Config
+	closedFetch         chan int
 }
 
 
@@ -220,6 +221,7 @@ func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
 	close(kv.closed)
+	close(kv.closedFetch)
 }
 
 func (kv *ShardKV) readPersist(snapshot []byte) {
@@ -314,8 +316,13 @@ func (kv *ShardKV) watchCommit() {
 						}else if op.Command == "Config"{
 							config := op.CommandObj.(shardctrler.Config)
 							DPrintf("server %s got config change %v ", kv.who(), config)
-							if config.Num != int(atomic.LoadInt32(&kv.configReadyNum)) + 1{
+							if config.Num > int(atomic.LoadInt32(&kv.configReadyNum)) + 1{
 								panic(fmt.Sprintf("server %s got config change num %d , but ready num is %d",
+									kv.who(), config.Num, atomic.LoadInt32(&kv.configReadyNum)))
+							}
+
+							if config.Num < int(atomic.LoadInt32(&kv.configReadyNum)) + 1{
+								panic(fmt.Sprintf("server %s got config change num %d , but ready num is %d ignore it",
 									kv.who(), config.Num, atomic.LoadInt32(&kv.configReadyNum)))
 							}
 
@@ -335,7 +342,7 @@ func (kv *ShardKV) watchCommit() {
 											Src: kv.gid,
 											Dst: gid,
 											ConfigNum: config.Num,
-											KV: kvmap,
+											KV: deepcopy.Copy(kvmap).(KVMap),
 										}
 									}
 								}else{
@@ -371,33 +378,38 @@ func (kv *ShardKV) watchCommit() {
 								DPrintf("server %s add config ready num to %d", kv.who(), atomic.LoadInt32(&kv.configReadyNum))
 							}else{
 								DPrintf("server %s got ShardTransferInfo %v", kv.who(), kv.shardToTransferInfo)
-								if _, isLeader := kv.rf.GetState(); isLeader{
-									for shard, info:= range kv.shardToTransferInfo{
-										if info.Src != kv.gid{
-											continue
-										}
-
-										//if shard != 3 && shard != 1 && shard != 5 && shard != 9{
-										//	continue
-										//}
-
-										DPrintf("server %s need send shard %d from %d to %d",
-											kv.who(), shard, info.Src, info.Dst)
-
-										kv.goSendTransfer(kv.shardToTransferInfo[shard], shard, info.Dst, true)
+								for shard, info:= range kv.shardToTransferInfo{
+									if info.Src != kv.gid{
+										continue
 									}
+
+									//if shard != 3 && shard != 1 && shard != 5 && shard != 9{
+									//	continue
+									//}
+
+									DPrintf("server %s need send shard %d from %d to %d",
+										kv.who(), shard, info.Src, info.Dst)
+
+									kv.goSendTransfer(kv.shardToTransferInfo[shard], shard, info.Dst, true)
 								}
 							}
 
 							DPrintf("server %s got config command end ", kv.who())
 						}else if op.Command == "Transfer"{
 							shardTransfer := op.CommandObj.(ShardTransfer)
-							if shardTransfer.ConfigNum != kv.Config.Num{
-								DPrintf(fmt.Sprintf("server %s got shard transfer %v , but cur config num is %d",
+							if shardTransfer.ConfigNum > kv.Config.Num{
+								DPrintf(fmt.Sprintf("server %s got shard transfer %v , but cur config num is %d need sender retry",
 									kv.who(), shardTransfer, kv.Config.Num))
 
 								if hasChan{
 									waitChan.(chan OpResult) <- OpResult{false, ErrWrongConfigNum}
+								}
+							}else if shardTransfer.ConfigNum < kv.Config.Num{
+								// 这种情况相当于sender crash后，从新发送，但是receiver已经接收完毕，告诉sender即可
+								DPrintf(fmt.Sprintf("server %s got shard transfer %v , but cur config num is %d tell sender already receive",
+									kv.who(), shardTransfer, kv.Config.Num))
+								if hasChan{
+									waitChan.(chan OpResult) <- OpResult{true, ""}
 								}
 							}else{
 								if _, ok := kv.shardToTransferInfo[shardTransfer.Shard];ok{
@@ -407,11 +419,8 @@ func (kv *ShardKV) watchCommit() {
 										DPrintf("server %s delete transfer shard %d", kv.who(), shardTransfer.Shard)
 									}else if shardTransfer.Dst == kv.gid{
 										shardTransfer.KV.Status = STABLE
-										kv.ShardToKVMap[shardTransfer.Shard] = shardTransfer.KV
+										kv.ShardToKVMap[shardTransfer.Shard] = deepcopy.Copy(shardTransfer.KV).(KVMap)
 										DPrintf("server %s create transfer shard %d", kv.who(), shardTransfer.Shard)
-										if hasChan {
-											waitChan.(chan OpResult) <- OpResult{true, ""}
-										}
 									}
 									if len(kv.shardToTransferInfo) == 0{
 										atomic.AddInt32(&kv.configReadyNum, 1)
@@ -422,15 +431,19 @@ func (kv *ShardKV) watchCommit() {
 										kv.who(), shardTransfer, kv.shardToTransferInfo)
 								}
 
+								if hasChan {
+									waitChan.(chan OpResult) <- OpResult{true, ""}
+								}
 							}
 
-						}else if op.Command == "QueryReady"{
-							if hasChan{
-								num := atomic.LoadInt32(&kv.configReadyNum)
-								waitChan.(chan OpResult) <-
-									OpResult{true, strconv.FormatInt(int64(num), 10)}
-							}
 						}
+						//else if op.Command == "QueryReady"{
+						//	if hasChan{
+						//		num := atomic.LoadInt32(&kv.configReadyNum)
+						//		waitChan.(chan OpResult) <-
+						//			OpResult{true, strconv.FormatInt(int64(num), 10)}
+						//	}
+						//}
 
 						if kv.maxraftstate != -1 && kv.rf.Persister.RaftStateSize() > kv.maxraftstate{
 							kv.rf.Snapshot(index, kv.persist())
@@ -457,6 +470,7 @@ func (kv *ShardKV) watchCommit() {
 				DPrintf("server %s got command %v end", kv.who(), command)
 			case <- kv.closed:
 				DPrintf("server %s watchCommit closed", kv.who())
+				return
 			}
 		}
 	}()
@@ -508,9 +522,13 @@ func (kv *ShardKV) fetchConfig() {
 				DPrintf("server %s timeout %p", kv.who(), &kv.readyChan)
 				// current config changed ok?
 				if kv.isCurConfReady(){
-					newConfig := kv.mck.Query(int(kv.configNum + 1))
+					newNum := int(atomic.LoadInt32(&kv.configReadyNum)) + 1
+					if newNum < kv.configNum + 1{
+						newNum = kv.configNum + 1
+					}
+					newConfig := kv.mck.Query(newNum)
 					//replace
-					if newConfig.Num == int(kv.configNum + 1){
+					if newConfig.Num == newNum{
 						DPrintf("server %s config change from %d to %d", kv.who(), kv.configNum, kv.configNum + 1)
 						op := Op{
 							Command: "Config",
@@ -519,7 +537,7 @@ func (kv *ShardKV) fetchConfig() {
 
 						message := raft.ServiceMessage{"op", op}
 						kv.rf.Start(message)
-						kv.configNum += 1
+						kv.configNum = newNum
 						kv.gidToReadyNum = make(map[int]int)
 						for gid, _ := range newConfig.Groups{
 							kv.gidToReadyNum[gid] = 0
@@ -570,7 +588,8 @@ func (kv *ShardKV) fetchConfig() {
 				if _, ok := kv.gidToReadyNum[msg.gid];ok{
 					kv.gidToReadyNum[msg.gid] = msg.num
 				}
-			case <- kv.closed:
+			case <- kv.closedFetch:
+				DPrintf("server %s fetchConfig closed", kv.who())
 				return
 			}
 		}
@@ -603,8 +622,11 @@ func (kv *ShardKV) goSendTransfer(obj ShardTransfer, shard int, dst int, notifyS
 						ok = srv.Call("ShardKV.Transfer", &args, &reply)
 						if reply.Err == ErrWrongLeader{
 							break
-						}else if reply.Err == OK && notifySrc{
-							kv.goSendTransfer(obj, shard, kv.gid, false)
+						}else if reply.Err == OK{
+							if notifySrc{
+								kv.goSendTransfer(obj, shard, kv.gid, false)
+							}
+							return
 						}
 						time.Sleep(time.Millisecond * 100)
 					}
@@ -662,6 +684,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	}
 
 	kv.closed = make(chan int)
+	kv.closedFetch = make(chan int)
 	kv.configNum = kv.Config.Num
 	kv.configReadyNum = int32(kv.configNum)
 	kv.gidToReadyNum = make(map[int]int)
