@@ -3,6 +3,7 @@ package shardkv
 import (
 	"6.824/labrpc"
 	"6.824/shardctrler"
+	"bytes"
 	"fmt"
 	"github.com/mohae/deepcopy"
 	"log"
@@ -76,6 +77,7 @@ type ShardKV struct {
 	ctrlers      []*labrpc.ClientEnd
 	maxraftstate int // snapshot if log grows this big
 	mck          *shardctrler.Clerk
+	servers []*labrpc.ClientEnd
 	// Your definitions here.
 
 	closed              chan int
@@ -225,7 +227,23 @@ func (kv *ShardKV) Kill() {
 }
 
 func (kv *ShardKV) readPersist(snapshot []byte) {
-	
+	if snapshot == nil || len(snapshot) < 1 { // bootstrap without any state?
+		return
+	}
+	DPrintf("server %s got persist snapshot data size %d", kv.who(), len(snapshot))
+	r1 := bytes.NewBuffer(snapshot)
+	d1 := labgob.NewDecoder(r1)
+	var data[]byte
+	var lastSnapshotIndex uint64
+	var lastSnapshotTerm uint64
+	if d1.Decode(&data) != nil ||
+		d1.Decode(&lastSnapshotIndex) != nil ||
+		d1.Decode(&lastSnapshotTerm) != nil{
+		panic(fmt.Sprintf("server %s read persist snapshot error", kv.who()))
+	}else{
+		kv.readSnapshot(data)
+		kv.CommitIndex = int(lastSnapshotIndex)
+	}
 }
 
 func (kv *ShardKV) watchCommit() {
@@ -385,11 +403,6 @@ func (kv *ShardKV) watchCommit() {
 									if info.Src != kv.gid{
 										continue
 									}
-
-									//if shard != 3 && shard != 1 && shard != 5 && shard != 9{
-									//	continue
-									//}
-
 									DPrintf("server %s need send shard %d from %d to %d",
 										kv.who(), shard, info.Src, info.Dst)
 
@@ -484,12 +497,44 @@ func (kv *ShardKV) who() interface{} {
 	return fmt.Sprintf("(%d, %d)", kv.gid, kv.me)
 }
 
-func (kv *ShardKV) readSnapshot(bytes []byte) {
-		
+func (kv *ShardKV) readSnapshot(snapshot []byte) {
+	if snapshot == nil || len(snapshot) < 1 { // bootstrap without any state?
+		return
+	}
+	DPrintf("server %s got snapshot data size %d", kv.who(), len(snapshot))
+
+	r2 := bytes.NewBuffer(snapshot)
+	d2 := labgob.NewDecoder(r2)
+	var clientToOpIndex map[string]int
+	var shardToKVMap map[int]*KVMap
+	var shardToTransferInfo map[int]ShardTransfer
+	var config shardctrler.Config
+	var configReadyNum int32
+	if d2.Decode(&clientToOpIndex) != nil ||
+		d2.Decode(&shardToKVMap) != nil ||
+		d2.Decode(&shardToTransferInfo) != nil ||
+		d2.Decode(&config) != nil ||
+		d2.Decode(&configReadyNum) != nil{
+		panic(fmt.Sprintf("server %s read snapshot error", kv.who()))
+	}else{
+		kv.ClientToOpIndex = clientToOpIndex
+		kv.ShardToKVMap = shardToKVMap
+		kv.shardToTransferInfo = shardToTransferInfo
+		kv.Config = config
+		atomic.StoreInt32(&kv.configReadyNum, configReadyNum)
+		DPrintf("server %s restore commit index to %d, configReadyNum to %d", kv.who(), kv.CommitIndex, configReadyNum)
+	}
 }
 
 func (kv *ShardKV) persist() []byte {
-	return make([]byte, 1)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.ClientToOpIndex)
+	e.Encode(kv.ShardToKVMap)
+	e.Encode(kv.shardToTransferInfo)
+	e.Encode(kv.Config)
+	e.Encode(atomic.LoadInt32(&kv.configReadyNum))
+	return w.Bytes()
 }
 
 func (kv *ShardKV) isDupOp(clientId string, opIndex int) bool{
@@ -542,17 +587,23 @@ func (kv *ShardKV) fetchConfig() {
 						message := raft.ServiceMessage{"op", op}
 						kv.rf.Start(message)
 						kv.configNum = newNum
+						//old has
+
+						DPrintf("server %s check gidToReadyNum %v for %d", kv.who(), kv.gidToReadyNum, kv.configNum)
+
 						kv.gidToReadyNum = make(map[int]int)
 						for gid, _ := range newConfig.Groups{
 							kv.gidToReadyNum[gid] = 0
 						}
+						kv.gidToReadyNum[kv.gid] = 0
 
+						DPrintf("server %s generate gidToReadyNum %v for %d", kv.who(), kv.gidToReadyNum, kv.configNum)
 						kv.queryConfig = newConfig
 					}else{
 						kv.gidToReadyNum = make(map[int]int)
 					}
 				}else{
-					DPrintf("server %s query ready num for config %v", kv.who(), kv.gidToReadyNum)
+					DPrintf("server %s query ready num of %d for config %v", kv.who(), kv.configNum, kv.gidToReadyNum)
 					//query other group the ready num
 					for gid, num := range kv.gidToReadyNum{
 						if num == kv.configNum{
@@ -627,9 +678,7 @@ func (kv *ShardKV) goSendTransfer(obj ShardTransfer, shard int, dst int, notifyS
 						if reply.Err == ErrWrongLeader{
 							break
 						}else if reply.Err == OK{
-							if notifySrc{
-								kv.goSendTransfer(obj, shard, kv.gid, false)
-							}
+							kv.goSendTransferForSelfGroup(obj, shard)
 							return
 						}
 						time.Sleep(time.Millisecond * 100)
@@ -638,6 +687,30 @@ func (kv *ShardKV) goSendTransfer(obj ShardTransfer, shard int, dst int, notifyS
 			}
 		}
 	}(kv.Config, shard, dst)
+}
+
+func (kv *ShardKV) goSendTransferForSelfGroup(obj ShardTransfer, shard int) {
+	go func(shard int){
+		args := TransferArgs{
+			Obj : obj,
+		}
+		for {
+			for si := 0; si < len(kv.servers); si++ {
+				srv := kv.servers[si]
+				var reply TransferReply
+				ok := false
+				for !ok || reply.Err != OK {
+					ok = srv.Call("ShardKV.Transfer", &args, &reply)
+					if reply.Err == ErrWrongLeader {
+						break
+					} else if reply.Err == OK {
+						return
+					}
+					time.Sleep(time.Millisecond * 100)
+				}
+			}
+		}
+	}(shard)
 }
 
 //
@@ -673,6 +746,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	labgob.Register(shardctrler.Config{})
 	labgob.Register(ShardTransfer{})
 	kv := new(ShardKV)
+	kv.servers = servers
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 	kv.make_end = make_end
@@ -701,7 +775,17 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.rf.SetID(kv.gid)
+	//kv.rf.SetID(kv.gid)
+
+	for shard, info:= range kv.shardToTransferInfo{
+		if info.Src != kv.gid{
+			continue
+		}
+		DPrintf("server %s need send shard %d from %d to %d",
+			kv.who(), shard, info.Src, info.Dst)
+
+		kv.goSendTransfer(kv.shardToTransferInfo[shard], shard, info.Dst, true)
+	}
 
 	kv.watchCommit()
 	kv.fetchConfig()
