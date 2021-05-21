@@ -506,13 +506,11 @@ func (kv *ShardKV) readSnapshot(snapshot []byte) {
 
 	r2 := bytes.NewBuffer(snapshot)
 	d2 := labgob.NewDecoder(r2)
-	var clientToOpIndex map[string]int
 	var shardToKVMap map[int]*KVMap
 	var shardToTransferInfo map[int]ShardTransfer
 	var config shardctrler.Config
 	var configReadyNum int32
-	if d2.Decode(&clientToOpIndex) != nil ||
-		d2.Decode(&shardToKVMap) != nil ||
+	if d2.Decode(&shardToKVMap) != nil ||
 		d2.Decode(&shardToTransferInfo) != nil ||
 		d2.Decode(&config) != nil ||
 		d2.Decode(&configReadyNum) != nil{
