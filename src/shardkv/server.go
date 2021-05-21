@@ -53,6 +53,7 @@ const (
 type KVMap struct{
 	Res map[string]string
 	Status KVMapState
+	ClientToOpIndex     map[string]int
 }
 
 type QueryMsg struct {
@@ -83,7 +84,6 @@ type ShardKV struct {
 	closed              chan int
 	indexToWaitChannel  sync.Map
 	ShardToKVMap        map[int]*KVMap
-	ClientToOpIndex     map[string]int
 	CommitIndex         int
 	Config              shardctrler.Config
 	configNum           int
@@ -278,9 +278,9 @@ func (kv *ShardKV) watchCommit() {
 
 							ret := false
 							value := ""
-							if retMap, ok := kv.getSharedMapByKey(op.Key);ok {
+							if kvmap, ok := kv.getSharedMapByKey(op.Key);ok {
 								ret = true
-								if val, ok := retMap[op.Key];ok{
+								if val, ok := kvmap.Res[op.Key];ok{
 									value = val
 								}
 
@@ -297,11 +297,11 @@ func (kv *ShardKV) watchCommit() {
 							ret := false
 							value := ""
 
-							if retMap, ok := kv.getSharedMapByKey(op.Key);ok{
+							if kvmap, ok := kv.getSharedMapByKey(op.Key);ok{
 								ret = true
-								if !kv.isDupOp(op.ClientId, op.OpIndex){
+								if !kv.isDupOp(op.ClientId, op.OpIndex, kvmap){
 									DPrintf("server %s put [%s] = %s", kv.who(), op.Key, op.Value)
-									retMap[op.Key] = op.Value
+									kvmap.Res[op.Key] = op.Value
 								}
 							}else{
 								ret = false
@@ -315,9 +315,10 @@ func (kv *ShardKV) watchCommit() {
 							ret := false
 							value := ""
 
-							if retMap, ok := kv.getSharedMapByKey(op.Key);ok {
+							if kvmap, ok := kv.getSharedMapByKey(op.Key);ok {
 								ret = true
-								if !kv.isDupOp(op.ClientId, op.OpIndex){
+								if !kv.isDupOp(op.ClientId, op.OpIndex, kvmap){
+									retMap := kvmap.Res
 									if val, ok := retMap[op.Key]; ok{
 										retMap[op.Key] = val + op.Value
 									}else{
@@ -374,6 +375,7 @@ func (kv *ShardKV) watchCommit() {
 												kv.ShardToKVMap[shard] = &KVMap{
 													Res : make(map[string]string),
 													Status : STABLE,
+													ClientToOpIndex: make(map[string]int),
 												}
 												DPrintf("server %s create shard %d", kv.who(), kv.gid)
 											}else{
@@ -516,7 +518,6 @@ func (kv *ShardKV) readSnapshot(snapshot []byte) {
 		d2.Decode(&configReadyNum) != nil{
 		panic(fmt.Sprintf("server %s read snapshot error", kv.who()))
 	}else{
-		kv.ClientToOpIndex = clientToOpIndex
 		kv.ShardToKVMap = shardToKVMap
 		kv.shardToTransferInfo = shardToTransferInfo
 		kv.Config = config
@@ -528,7 +529,6 @@ func (kv *ShardKV) readSnapshot(snapshot []byte) {
 func (kv *ShardKV) persist() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(kv.ClientToOpIndex)
 	e.Encode(kv.ShardToKVMap)
 	e.Encode(kv.shardToTransferInfo)
 	e.Encode(kv.Config)
@@ -536,14 +536,14 @@ func (kv *ShardKV) persist() []byte {
 	return w.Bytes()
 }
 
-func (kv *ShardKV) isDupOp(clientId string, opIndex int) bool{
-
-	if _, ok := kv.ClientToOpIndex[clientId]; !ok{
-		kv.ClientToOpIndex[clientId] = 0
+func (kv *ShardKV) isDupOp(clientId string, opIndex int, kvmap *KVMap) bool{
+	clientToOpIndex := kvmap.ClientToOpIndex
+	if _, ok := clientToOpIndex[clientId]; !ok{
+		clientToOpIndex[clientId] = 0
 	}
 
-	if kv.ClientToOpIndex[clientId] < opIndex{
-		kv.ClientToOpIndex[clientId] = opIndex
+	if clientToOpIndex[clientId] < opIndex{
+		clientToOpIndex[clientId] = opIndex
 		return false
 	}
 
@@ -551,10 +551,10 @@ func (kv *ShardKV) isDupOp(clientId string, opIndex int) bool{
 
 }
 
-func (kv *ShardKV) getSharedMapByKey(key string) (map[string]string, bool){
+func (kv *ShardKV) getSharedMapByKey(key string) (*KVMap, bool){
 	if retMap, ok := kv.ShardToKVMap[key2shard(key)];ok{
 		if retMap.Status == STABLE{
-			return retMap.Res, true
+			return retMap, true
 		}else{
 			return nil, false
 		}
@@ -763,7 +763,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// Your initialization code here.
 	kv.CommitIndex = 0
 	kv.ShardToKVMap = make(map[int]*KVMap)
-	kv.ClientToOpIndex = make(map[string]int)
 	kv.Config = shardctrler.Config{
 		Num : 0,
 	}
