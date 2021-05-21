@@ -236,6 +236,8 @@ func TestMissChange(t *testing.T) {
 		check(t, ck, ka[i], va[i])
 	}
 
+	fmt.Printf("pass 1")
+
 	cfg.join(1)
 
 	cfg.ShutdownServer(0, 0)
@@ -253,6 +255,7 @@ func TestMissChange(t *testing.T) {
 		va[i] += x
 	}
 
+	fmt.Printf("pass 2")
 	cfg.join(1)
 
 	for i := 0; i < n; i++ {
@@ -262,6 +265,7 @@ func TestMissChange(t *testing.T) {
 		va[i] += x
 	}
 
+	fmt.Printf("pass 3")
 	cfg.StartServer(0, 0)
 	cfg.StartServer(1, 0)
 	cfg.StartServer(2, 0)
@@ -273,6 +277,7 @@ func TestMissChange(t *testing.T) {
 		va[i] += x
 	}
 
+	fmt.Printf("pass 4")
 	time.Sleep(2 * time.Second)
 
 	cfg.ShutdownServer(0, 1)
@@ -289,6 +294,7 @@ func TestMissChange(t *testing.T) {
 		va[i] += x
 	}
 
+	fmt.Printf("pass 5")
 	cfg.StartServer(0, 1)
 	cfg.StartServer(1, 1)
 	cfg.StartServer(2, 1)

@@ -336,80 +336,79 @@ func (kv *ShardKV) watchCommit() {
 						}else if op.Command == "Config"{
 							config := op.CommandObj.(shardctrler.Config)
 							DPrintf("server %s got config change %v ", kv.who(), config)
-							if config.Num > int(atomic.LoadInt32(&kv.configReadyNum)) + 1{
-								panic(fmt.Sprintf("server %s got config change num %d , but ready num is %d",
-									kv.who(), config.Num, atomic.LoadInt32(&kv.configReadyNum)))
+							if config.Num > kv.Config.Num + 1{
+								panic(fmt.Sprintf("server %s got config change num %d , but cur num is %d",
+									kv.who(), config.Num, kv.Config.Num))
 							}
 
-							if config.Num < int(atomic.LoadInt32(&kv.configReadyNum)) + 1{
-								panic(fmt.Sprintf("server %s got config change num %d , but ready num is %d ignore it",
-									kv.who(), config.Num, atomic.LoadInt32(&kv.configReadyNum)))
-							}
-
-							kv.shardToTransferInfo = make(map[int]ShardTransfer)
-							for shard, gid := range config.Shards{
-								kvmap, ok := kv.ShardToKVMap[shard]
-								if ok{
-									if gid == kv.gid{
-										//old have, new have
-									}else{
-										//old have, new not have
-										//remove, set the state to TRANSFER, then send
-										//delete(kv.ShardToKVMap, shard)
-										kvmap.Status = TRANSFER
-										kv.shardToTransferInfo[shard] = ShardTransfer{
-											Shard: shard,
-											Src: kv.gid,
-											Dst: gid,
-											ConfigNum: config.Num,
-											KV: *(deepcopy.Copy(kvmap).(*KVMap)),
-										}
-
-										//DPrintf("server %s debug for map %v", kv.who(), kv.ShardToKVMap)
-									}
-								}else{
-									if gid == kv.gid{
-										//old not have, new have
-										if config.Num == 1{
-											//create
-											kv.ShardToKVMap[shard] = &KVMap{
-												Res : make(map[string]string),
-												Status : STABLE,
-											}
-											DPrintf("server %s create shard %d", kv.who(), kv.gid)
+							if config.Num < kv.Config.Num + 1{
+								DPrintf(fmt.Sprintf("server %s got config change num %d , but cur num is %d ignore it",
+									kv.who(), config.Num, kv.Config.Num))
+							}else{
+								kv.shardToTransferInfo = make(map[int]ShardTransfer)
+								for shard, gid := range config.Shards{
+									kvmap, ok := kv.ShardToKVMap[shard]
+									if ok{
+										if gid == kv.gid{
+											//old have, new have
 										}else{
-											//wait for receiving
-
+											//old have, new not have
+											//remove, set the state to TRANSFER, then send
+											//delete(kv.ShardToKVMap, shard)
+											kvmap.Status = TRANSFER
 											kv.shardToTransferInfo[shard] = ShardTransfer{
 												Shard: shard,
-												Src: kv.Config.Shards[shard],
-												Dst: kv.gid,
+												Src: kv.gid,
+												Dst: gid,
 												ConfigNum: config.Num,
+												KV: *(deepcopy.Copy(kvmap).(*KVMap)),
 											}
+
+											//DPrintf("server %s debug for map %v", kv.who(), kv.ShardToKVMap)
 										}
 									}else{
-										//old not have, new not have
+										if gid == kv.gid{
+											//old not have, new have
+											if config.Num == 1{
+												//create
+												kv.ShardToKVMap[shard] = &KVMap{
+													Res : make(map[string]string),
+													Status : STABLE,
+												}
+												DPrintf("server %s create shard %d", kv.who(), kv.gid)
+											}else{
+												//wait for receiving
+
+												kv.shardToTransferInfo[shard] = ShardTransfer{
+													Shard: shard,
+													Src: kv.Config.Shards[shard],
+													Dst: kv.gid,
+													ConfigNum: config.Num,
+												}
+											}
+										}else{
+											//old not have, new not have
+										}
+									}
+								}
+								kv.Config = config
+
+								if len(kv.shardToTransferInfo) == 0{
+									atomic.AddInt32(&kv.configReadyNum, 1)
+									DPrintf("server %s add config ready num to %d", kv.who(), atomic.LoadInt32(&kv.configReadyNum))
+								}else{
+									DPrintf("server %s got ShardTransferInfo %v", kv.who(), kv.shardToTransferInfo)
+									for shard, info:= range kv.shardToTransferInfo{
+										if info.Src != kv.gid{
+											continue
+										}
+										DPrintf("server %s need send shard %d from %d to %d",
+											kv.who(), shard, info.Src, info.Dst)
+
+										kv.goSendTransfer(kv.shardToTransferInfo[shard], shard, info.Dst, true)
 									}
 								}
 							}
-							kv.Config = config
-
-							if len(kv.shardToTransferInfo) == 0{
-								atomic.AddInt32(&kv.configReadyNum, 1)
-								DPrintf("server %s add config ready num to %d", kv.who(), atomic.LoadInt32(&kv.configReadyNum))
-							}else{
-								DPrintf("server %s got ShardTransferInfo %v", kv.who(), kv.shardToTransferInfo)
-								for shard, info:= range kv.shardToTransferInfo{
-									if info.Src != kv.gid{
-										continue
-									}
-									DPrintf("server %s need send shard %d from %d to %d",
-										kv.who(), shard, info.Src, info.Dst)
-
-									kv.goSendTransfer(kv.shardToTransferInfo[shard], shard, info.Dst, true)
-								}
-							}
-
 							DPrintf("server %s got config command end ", kv.who())
 						}else if op.Command == "Transfer"{
 							shardTransfer := op.CommandObj.(ShardTransfer)
@@ -572,13 +571,13 @@ func (kv *ShardKV) fetchConfig() {
 				// current config changed ok?
 				if kv.isCurConfReady(){
 					newNum := int(atomic.LoadInt32(&kv.configReadyNum)) + 1
-					if newNum < kv.configNum + 1{
-						newNum = kv.configNum + 1
-					}
+					//if newNum < kv.configNum + 1{
+					//	newNum = kv.configNum + 1
+					//}
 					newConfig := kv.mck.Query(newNum)
 					//replace
 					if newConfig.Num == newNum{
-						DPrintf("server %s config change from %d to %d", kv.who(), kv.configNum, kv.configNum + 1)
+						DPrintf("server %s config change from %d to %d", kv.who(), kv.configNum, newNum)
 						op := Op{
 							Command: "Config",
 							CommandObj: newConfig,
@@ -652,8 +651,9 @@ func (kv *ShardKV) fetchConfig() {
 }
 
 func (kv *ShardKV) isCurConfReady() bool{
+	checkNum := int(atomic.LoadInt32(&kv.configReadyNum))
 	for _, num := range kv.gidToReadyNum{
-		if num < kv.configNum{
+		if num < checkNum{
 			return false
 		}
 	}
@@ -663,6 +663,7 @@ func (kv *ShardKV) isCurConfReady() bool{
 
 func (kv *ShardKV) goSendTransfer(obj ShardTransfer, shard int, dst int, notifySrc bool) {
 	go func(config shardctrler.Config, shard int, dst int){
+		DPrintf("server %s enter goSendTransfer shard %d to %d", kv.who(), shard, dst)
 		args := TransferArgs{
 			Obj : obj,
 		}
@@ -673,9 +674,12 @@ func (kv *ShardKV) goSendTransfer(obj ShardTransfer, shard int, dst int, notifyS
 					srv := kv.make_end(servers[si])
 					var reply TransferReply
 					ok := false
-					for !ok || reply.Err != OK{
+					for reply.Err != OK{
+						DPrintf("server %s call transfer shard %d before", kv.who(), shard)
 						ok = srv.Call("ShardKV.Transfer", &args, &reply)
-						if reply.Err == ErrWrongLeader{
+						DPrintf("server %s call transfer shard %d after from %d, reply %v, ok %t",
+							kv.who(), shard, dst, reply, ok)
+						if reply.Err == ErrWrongLeader || !ok{
 							break
 						}else if reply.Err == OK{
 							kv.goSendTransferForSelfGroup(obj, shard)
@@ -684,6 +688,9 @@ func (kv *ShardKV) goSendTransfer(obj ShardTransfer, shard int, dst int, notifyS
 						time.Sleep(time.Millisecond * 100)
 					}
 				}
+			}else{
+				panic(fmt.Sprintf("server %s goSendTransfer to %d, but config map is %v",
+					kv.who(), dst, config))
 			}
 		}
 	}(kv.Config, shard, dst)
@@ -701,7 +708,7 @@ func (kv *ShardKV) goSendTransferForSelfGroup(obj ShardTransfer, shard int) {
 				ok := false
 				for !ok || reply.Err != OK {
 					ok = srv.Call("ShardKV.Transfer", &args, &reply)
-					if reply.Err == ErrWrongLeader {
+					if reply.Err == ErrWrongLeader || !ok{
 						break
 					} else if reply.Err == OK {
 						return
@@ -781,7 +788,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		if info.Src != kv.gid{
 			continue
 		}
-		DPrintf("server %s need send shard %d from %d to %d",
+		DPrintf("server %s need send shard %d from %d to %d from backup",
 			kv.who(), shard, info.Src, info.Dst)
 
 		kv.goSendTransfer(kv.shardToTransferInfo[shard], shard, info.Dst, true)
